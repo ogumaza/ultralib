@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+
+# find_package(ultralib) reads this file. The file finds xsflib first, then ntdlib and seqlib if ultralib was built with
+# ULTRALIB_SOUND. ultralib's targets come last. ULTRALIB_SOUND and
+# ULTRALIB_SEQUENCE_EXPORT keep the values that ultralib was built with, for a consumer to read.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(ULTRALIB_SOUND @ULTRALIB_SOUND@)
+set(ULTRALIB_SEQUENCE_EXPORT @ULTRALIB_SEQUENCE_EXPORT@)
+
+find_dependency(xsflib 1.10)
+if (ULTRALIB_SOUND)
+    find_dependency(ntdlib 4.0)
+    find_dependency(seqlib 1.4)
+endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/ultralibTargets.cmake)
+check_required_components(ultralib)

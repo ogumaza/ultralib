@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <initializer_list>
 
+#include "ead_constants.h"
 #include "ead_early_constants.h"
 #include "ead_lists.h"
 #include "ead_tables.h"
+#include "ead_voice_lists.h"
 #include "ultralib/n64/ead_early.h"
 
 namespace ultralib::n64
@@ -18,13 +20,13 @@ namespace ultralib::n64
 namespace
 {
 
+using ead_constants::kMuteSoften;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kMuteStopScript;
+using ead_constants::kPriorityDisabled;
+using ead_constants::kPriorityMinimum;
+using ead_constants::kPriorityStopping;
 using ead_early_constants::kGlobalPool;
-using ead_early_constants::kMuteSoften;
-using ead_early_constants::kMuteStopNotes;
-using ead_early_constants::kMuteStopScript;
-using ead_early_constants::kPriorityDisabled;
-using ead_early_constants::kPriorityMinimum;
-using ead_early_constants::kPriorityStopping;
 using ead_early_constants::kStateFadeIn;
 using ead_early_constants::kStateFadeOut;
 using ead_early_constants::kStateFadeTo;
@@ -79,151 +81,59 @@ void RampVibratoValue(uint16_t& value, uint16_t& timer, uint16_t target, uint16_
     }
 }
 
+// The early engine takes a voice of lower or equal priority to the new note.
+constexpr auto kPriorityRule = ead_voice_lists::PriorityRule::kLowerOrEqual;
+
 } // namespace
 
 int EadEarlyPlayer::Head(int pool, ListKind kind) const
 {
-    return static_cast<int>(voices_.size()) + pool * 4 + kind;
+    return ead_voice_lists::Head(static_cast<int>(voices_.size()), pool, kind);
 }
 
 int EadEarlyPlayer::PlayerPool(int player) const
 {
-    return 1 + player;
+    return ead_voice_lists::PlayerPool(player);
 }
 
 int EadEarlyPlayer::ChannelPool(int channel) const
 {
-    return 1 + kPlayers + channel;
+    return ead_voice_lists::ChannelPool(kPlayers, channel);
 }
 
 void EadEarlyPlayer::PushBack(int head, int voice)
 {
-    const auto v = static_cast<std::size_t>(voice);
-    if (previous_[v] != -1)
-    {
-        return;
-    }
-
-    const auto h = static_cast<std::size_t>(head);
-    previous_[v] = previous_[h];
-    next_[v] = head;
-    next_[static_cast<std::size_t>(previous_[h])] = voice;
-    previous_[h] = voice;
-    voices_[v].pool = (head - static_cast<int>(voices_.size())) / 4;
+    ead_voice_lists::PushBack(next_, previous_, voices_, head, voice);
 }
 
 void EadEarlyPlayer::PushFront(int head, int voice)
 {
-    const auto v = static_cast<std::size_t>(voice);
-    if (previous_[v] != -1)
-    {
-        return;
-    }
-
-    const auto h = static_cast<std::size_t>(head);
-    previous_[v] = head;
-    next_[v] = next_[h];
-    previous_[static_cast<std::size_t>(next_[h])] = voice;
-    next_[h] = voice;
-    voices_[v].pool = (head - static_cast<int>(voices_.size())) / 4;
+    ead_voice_lists::PushFront(next_, previous_, voices_, head, voice);
 }
 
 int EadEarlyPlayer::PopBack(int head)
 {
-    const int voice = previous_[static_cast<std::size_t>(head)];
-    if (voice == head)
-    {
-        return -1;
-    }
-
-    Remove(voice);
-
-    return voice;
+    return ead_voice_lists::PopBack(next_, previous_, head);
 }
 
 void EadEarlyPlayer::Remove(int voice)
 {
-    const auto v = static_cast<std::size_t>(voice);
-    if (previous_[v] == -1)
-    {
-        return;
-    }
-
-    next_[static_cast<std::size_t>(previous_[v])] = next_[v];
-    previous_[static_cast<std::size_t>(next_[v])] = previous_[v];
-    previous_[v] = -1;
+    ead_voice_lists::Remove(next_, previous_, voice);
 }
 
 void EadEarlyPlayer::ClearPool(int pool)
 {
-    for (const ListKind kind : {kDisabled, kDecaying, kReleasing, kActive})
-    {
-        const int source = Head(pool, kind);
-        const int target = Head(kGlobalPool, kind);
-        for (int moved = 0; moved <= static_cast<int>(voices_.size()); moved++)
-        {
-            const int voice = next_[static_cast<std::size_t>(source)];
-            if (voice == source)
-            {
-                break;
-            }
-
-            Remove(voice);
-            PushBack(target, voice);
-        }
-    }
+    ead_voice_lists::ClearPool(next_, previous_, voices_, pool);
 }
 
 void EadEarlyPlayer::FillPool(int pool, int count)
 {
-    ClearPool(pool);
-    int taken = 0;
-    for (const ListKind kind : {kDisabled, kDecaying, kReleasing, kActive})
-    {
-        while (taken < count)
-        {
-            const int voice = PopBack(Head(kGlobalPool, kind));
-            if (voice == -1)
-            {
-                break;
-            }
-
-            PushBack(Head(pool, kind), voice);
-            taken++;
-        }
-
-        if (taken >= count)
-        {
-            return;
-        }
-    }
+    ead_voice_lists::FillPool(next_, previous_, voices_, pool, count);
 }
 
 int EadEarlyPlayer::PopLowerPriority(int head, int limit)
 {
-    int current = next_[static_cast<std::size_t>(head)];
-    if (current == head)
-    {
-        return -1;
-    }
-
-    int best = current;
-    for (; current != head; current = next_[static_cast<std::size_t>(current)])
-    {
-        if (voices_[static_cast<std::size_t>(best)].priority >= voices_[static_cast<std::size_t>(current)].priority)
-        {
-            best = current;
-        }
-    }
-
-    if (limit < voices_[static_cast<std::size_t>(best)].priority)
-    {
-        return -1;
-    }
-
-    Remove(best);
-
-    return best;
+    return ead_voice_lists::PopLowerPriority(next_, previous_, voices_, head, limit, kPriorityRule);
 }
 
 EadEnvelope::Point EadEarlyPlayer::EnvelopePoint(const EnvelopeRef& envelope, int index) const
@@ -307,10 +217,12 @@ void EadEarlyPlayer::PlayerSound(int index)
             case kStateFadeOut:
                 DisablePlayer(index);
                 return;
+
             case kStateFadeIn:
             case kStateFadeTo:
                 player.state = 0;
                 break;
+
             default:
                 break;
             }
@@ -418,19 +330,23 @@ void EadEarlyPlayer::UpdateAdsr(Voice& voice)
 {
     Adsr& adsr = voice.adsr;
     const uint8_t action = adsr.action;
+
     switch (adsr.phase)
     {
     case AdsrPhase::kDisabled:
         return;
+
     case AdsrPhase::kInitial:
         adsr.current = 0;
         adsr.target = 0;
         [[fallthrough]];
+
     case AdsrPhase::kStartLoop:
         adsr.index = 0;
         adsr.current_fine = static_cast<int32_t>(static_cast<uint32_t>(static_cast<int32_t>(adsr.current)) << 16);
         adsr.phase = AdsrPhase::kLoop;
         [[fallthrough]];
+
     case AdsrPhase::kLoop:
         ReadEnvelopePoint(adsr);
         if (adsr.phase != AdsrPhase::kFade)
@@ -439,6 +355,7 @@ void EadEarlyPlayer::UpdateAdsr(Voice& voice)
         }
 
         [[fallthrough]];
+
     case AdsrPhase::kFade:
         adsr.current_fine =
             static_cast<int32_t>(static_cast<uint32_t>(adsr.current_fine) + static_cast<uint32_t>(adsr.velocity));
@@ -448,21 +365,22 @@ void EadEarlyPlayer::UpdateAdsr(Voice& voice)
         {
             adsr.phase = AdsrPhase::kLoop;
         }
-
         break;
+
     case AdsrPhase::kHang:
         break;
+
     case AdsrPhase::kDecay:
     case AdsrPhase::kRelease:
         StepDecayOrRelease(adsr);
         break;
+
     case AdsrPhase::kSustain:
         adsr.delay--;
         if (adsr.delay == 0)
         {
             adsr.phase = AdsrPhase::kRelease;
         }
-
         break;
     }
 
@@ -492,15 +410,19 @@ void EadEarlyPlayer::ReadEnvelopePoint(Adsr& adsr) const
     case kEnvelopeDisable:
         adsr.phase = AdsrPhase::kDisabled;
         break;
+
     case kEnvelopeHang:
         adsr.phase = AdsrPhase::kHang;
         break;
+
     case kEnvelopeGoto:
         adsr.index = point.target;
         break;
+
     case kEnvelopeRestart:
         adsr.phase = AdsrPhase::kInitial;
         break;
+
     default:
         adsr.target = point.target;
         adsr.velocity =
@@ -567,11 +489,13 @@ void EadEarlyPlayer::DecayOrRelease(int layer_index, AdsrPhase target)
     }
 
     layer.loaded = false;
+
     if (voice.adsr.phase != AdsrPhase::kDecay)
     {
         voice.saved_frequency = layer.note_frequency;
         voice.saved_velocity = layer.note_velocity;
         voice.saved_pan = layer.note_pan;
+
         if (has_channel)
         {
             voice.saved_reverb = channels_[static_cast<std::size_t>(layer.channel)].reverb;
@@ -638,6 +562,7 @@ void EadEarlyPlayer::BuildWave(Voice& voice, Layer& layer, AudioMemory* memory)
     }
 
     voice.program = channel.program;
+
     if (memory == nullptr)
     {
         return;
@@ -744,26 +669,22 @@ void EadEarlyPlayer::ReleaseAndTake(int voice_index, int layer_index)
 
 int EadEarlyPlayer::AllocFromDisabled(int pool, int layer)
 {
-    const int voice = PopBack(Head(pool, kDisabled));
-    if (voice != -1)
+    const auto take = [&](int voice)
     {
         InitVoiceForLayer(voice, layer);
-        PushFront(Head(pool, kActive), voice);
-    }
+    };
 
-    return voice;
+    return ead_voice_lists::AllocFromDisabled(next_, previous_, voices_, pool, take);
 }
 
 int EadEarlyPlayer::AllocFromDecaying(int pool, int layer)
 {
-    const int voice = PopBack(Head(pool, kDecaying));
-    if (voice != -1)
+    const auto take = [&](int voice)
     {
         ReleaseAndTake(voice, layer);
-        PushBack(Head(pool, kReleasing), voice);
-    }
+    };
 
-    return voice;
+    return ead_voice_lists::AllocFromDecaying(next_, previous_, voices_, pool, take);
 }
 
 int EadEarlyPlayer::AllocFromActive(int pool, int layer_index)
@@ -824,6 +745,7 @@ int EadEarlyPlayer::AllocVoice(int layer_index)
     const uint8_t policy = channel.policy;
     const int channel_pool = ChannelPool(layer.channel);
     const int player_pool = PlayerPool(channel.player);
+
     if ((policy & kPolicyLayer) != 0)
     {
         const int voice = layer.voice;
@@ -1051,6 +973,7 @@ void EadEarlyPlayer::SetVelocityPanReverb(Voice& voice, float velocity, float pa
 
     voice.target_left = static_cast<uint16_t>(static_cast<uint16_t>(static_cast<int32_t>(velocity * left)) & ~0x80FF);
     voice.target_right = static_cast<uint16_t>(static_cast<uint16_t>(static_cast<int32_t>(velocity * right)) & ~0x80FF);
+
     if (voice.target_left == 0)
     {
         voice.target_left++;

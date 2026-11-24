@@ -14,6 +14,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/ead_bank.h"
 #include "ultralib/n64/midi.h"
 #include "ultralib/n64/rom_data.h"
@@ -26,30 +27,14 @@ namespace
 
 namespace n64 = ultralib::n64;
 
-using Bytes = std::vector<uint8_t>;
+using ultralib::testing::Append;
+using ultralib::testing::Bytes;
 
 constexpr std::string_view kRepeated = "abcabcabcd";
 
 Bytes Text(std::string_view text)
 {
     return Bytes(text.begin(), text.end());
-}
-
-void Put16(Bytes& out, uint16_t value)
-{
-    out.push_back(static_cast<uint8_t>(value >> 8));
-    out.push_back(static_cast<uint8_t>(value));
-}
-
-void Put32(Bytes& out, uint32_t value)
-{
-    Put16(out, static_cast<uint16_t>(value >> 16));
-    Put16(out, static_cast<uint16_t>(value));
-}
-
-void Append(Bytes& out, std::initializer_list<uint8_t> bytes)
-{
-    out.insert(out.end(), bytes);
 }
 
 // Each stream comes from zlib's deflate, or by hand from RFC 1951 for the stored block, after the two bytes of Rare's
@@ -60,7 +45,7 @@ void TestRare()
     const Bytes stored = {0x11, 0x72, 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c'};
     XSFLIB_CHECK(n64::DecodeRare(stored) == Text("abc"));
 
-    // A block with the fixed codes, which repeats from 3 bytes back.
+    // A block with the fixed codes. It repeats the bytes from 3 bytes back.
     const Bytes fixed = {0x11, 0x72, 0x4B, 0x4C, 0x4A, 0x4E, 0x04, 0xA3, 0x14, 0x00};
     XSFLIB_CHECK(n64::DecodeRare(fixed) == Text(kRepeated));
 
@@ -94,14 +79,14 @@ void TestRareSequenceTable()
     Bytes image(6, 0xFF);
     const Bytes first = {0x11, 0x72, 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c'};
     const Bytes second = {0x11, 0x72, 0x01, 0x01, 0x00, 0xFE, 0xFF, 'd'};
-    Put16(image, 2);
-    Put16(image, 0);
-    Put32(image, 20);
-    Put16(image, 3);
-    Put16(image, static_cast<uint16_t>(first.size()));
-    Put32(image, 30);
-    Put16(image, 1);
-    Put16(image, static_cast<uint16_t>(second.size()));
+    xsflib::AppendBe16(image, 2);
+    xsflib::AppendBe16(image, 0);
+    xsflib::AppendBe32(image, 20);
+    xsflib::AppendBe16(image, 3);
+    xsflib::AppendBe16(image, static_cast<uint16_t>(first.size()));
+    xsflib::AppendBe32(image, 30);
+    xsflib::AppendBe16(image, 1);
+    xsflib::AppendBe16(image, static_cast<uint16_t>(second.size()));
     image.insert(image.end(), first.begin(), first.end());
     image.insert(image.end(), second.begin(), second.end());
 
@@ -127,21 +112,21 @@ void TestRareSequenceTable()
 
 void PutLaterEntry(Bytes& out, uint32_t address, uint32_t size, uint16_t counts)
 {
-    Put32(out, address);
-    Put32(out, size);
+    xsflib::AppendBe32(out, address);
+    xsflib::AppendBe32(out, size);
     Append(out, {2, 3});
-    Put16(out, 0);
-    Put16(out, counts);
-    Put16(out, 0);
+    xsflib::AppendBe16(out, 0);
+    xsflib::AppendBe16(out, counts);
+    xsflib::AppendBe16(out, 0);
 }
 
 void PutLaterHeader(Bytes& out, uint16_t count)
 {
-    Put16(out, count);
+    xsflib::AppendBe16(out, count);
     out.resize(out.size() + 14, 0);
 }
 
-// Tables in the image, as a game without a file table holds them, and files in a row after a stretch of zeros.
+// Tables in the image where a game without a file table keeps them, and files in a row after a stretch of zeros.
 void TestFindPlainLaterSoundData()
 {
     Bytes image(16, 0xAA);
@@ -183,9 +168,9 @@ void TestFindFiles()
     // A sequence bank at 0x20 with one entry, and a standard MIDI file after it, at an odd offset.
     Bytes image(0x20, 0xFF);
     Append(image, {'S', '1'});
-    Put16(image, 1);
-    Put32(image, 12);
-    Put32(image, 4);
+    xsflib::AppendBe16(image, 1);
+    xsflib::AppendBe32(image, 12);
+    xsflib::AppendBe32(image, 4);
     Append(image, {1, 2, 3, 4});
 
     const n64::MidiEvent end = {.delta = 0, .status = 0xFF, .type = 0x2F};
@@ -207,12 +192,12 @@ void TestFindFiles()
 void AppendEarlyFile(Bytes& image, std::size_t offset, uint16_t revision)
 {
     image.resize(offset);
-    Put16(image, revision);
-    Put16(image, 2);
-    Put32(image, 20);
-    Put32(image, 8);
-    Put32(image, 28);
-    Put32(image, 8);
+    xsflib::AppendBe16(image, revision);
+    xsflib::AppendBe16(image, 2);
+    xsflib::AppendBe32(image, 20);
+    xsflib::AppendBe32(image, 8);
+    xsflib::AppendBe32(image, 28);
+    xsflib::AppendBe32(image, 8);
     image.resize(offset + 36, 0xAA);
 }
 
@@ -225,8 +210,8 @@ void TestFindEarlySoundData()
 
     // The table of the sequences' banks: two offsets, then bank 1 for the first sequence and bank 0 for the second.
     image.resize(0xA0);
-    Put16(image, 4);
-    Put16(image, 6);
+    xsflib::AppendBe16(image, 4);
+    xsflib::AppendBe16(image, 6);
     Append(image, {1, 1, 1, 0});
     image.resize(0x100, 0xFF);
 

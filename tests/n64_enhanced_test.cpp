@@ -275,7 +275,7 @@ void TestToneAtAHigherRate()
     CheckTone(out, 48000, 1.0, kTapLag, kGain);
 }
 
-// An exact multiple of the game's rate needs no last interpolator.
+// An exact multiple of the game's rate uses no last interpolator.
 void TestToneAtAMultiple()
 {
     Bench bench({}, 96000);

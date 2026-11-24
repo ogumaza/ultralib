@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-// The FPU's arithmetic in each rounding mode against IEEE 754, which the VR4300's FPU follows for normal numbers. Each
-// case runs one instruction on chosen operands and checks the result and FCR31: the rounding mode, the cause bits and
-// the flags. The floating-point operands and results are normal numbers, apart from the zero divisor and the infinity
-// of the division by zero.
+// The FPU's arithmetic in each rounding mode against IEEE 754. The VR4300's FPU follows IEEE 754 for normal numbers.
+// Each case runs one instruction on chosen operands and checks the result and FCR31: the rounding mode, the cause bits
+// and the flags. The floating-point operands and results are normal numbers, apart from the zero divisor and the
+// infinity of the division by zero.
 //
 // The expected values come from exact arithmetic on the operands and the standard's rounding rules, not from a run of
 // the core. The four modes round to the nearest value with ties to even, toward zero, toward plus infinity and toward

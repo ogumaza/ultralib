@@ -8,7 +8,7 @@
 // effect's output with the dry output, and the last filter saves the interleaved output in memory. A list is built in
 // chunks of at most 160 samples, pulling the filters from the output back.
 //
-// A client (a sequence player) changes a voice with updates that carry a time in samples. Each update goes in a queue
+// A client (a sequence player) changes a voice with updates that contain a time in samples. Each update goes in a queue
 // on the voice's envelope mixer. The mixer runs up to each update's time, then applies it. The game's table of free
 // updates has a fixed size, and an update without a free entry is dropped.
 //
@@ -20,12 +20,11 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <deque>
-#include <optional>
 #include <vector>
 
+#include "ultralib/n64/al_delay.h"
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
 
@@ -253,34 +252,8 @@ private:
         std::deque<Param> updates;
     };
 
-    struct LowPass
-    {
-        int16_t cutoff = 0;
-        int16_t gain = 0;
-        std::array<int16_t, 16> coefficients = {};
-        uint32_t coefficients_address = 0;
-        uint32_t state = 0;
-        bool first = true;
-    };
-
-    struct Delay
-    {
-        uint32_t input = 0;
-        uint32_t output = 0;
-        int16_t feed_forward = 0;
-        int16_t feedback = 0;
-        int16_t gain = 0;
-        float mod_increment = 0.0F;
-        float mod_value = 0.0F;
-        int32_t mod_delta = 0;
-        float mod_gain = 0.0F;
-        bool has_low_pass = false;
-        LowPass low_pass;
-        bool has_resampler = false;
-        uint32_t resampler_state = 0;
-        float resampler_delta = 0.0F;
-        bool resampler_first = true;
-    };
+    using LowPass = AlLowPass;
+    using Delay = AlDelay;
 
     struct Fx
     {
@@ -330,12 +303,8 @@ private:
     void PullCompactAdpcm(AudioList& list, PhysicalVoiceState& voice, int16_t& out, int count);
     void PullCompactAdpcmLoops(AudioList& list, PhysicalVoiceState& voice, int16_t out, int count, int samples,
                                int frames);
-    void CompactDecodeChunk(AudioList& list, PhysicalVoiceState& voice, int tsam, int bytes, int16_t out,
-                            uint32_t flags);
-    void CompactLoadFx(AudioList& list, int64_t position, int buffer, int count);
     void CompactSaveFx(AudioList& list, int64_t position, int buffer);
     void CompactLoadFxOutput(AudioList& list, Delay& delay, int buffer);
-    void CompactFilter(AudioList& list, LowPass& low_pass, int buffer);
 
     void ApplySetWave(AudioMemory& memory, PhysicalVoiceState& voice, const AlWave& wave);
     void ResetFilters(PhysicalVoiceState& voice);

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: MIT
 
-# Builds ultralib on its own whenever main changes: on Windows x64 with clang-cl. The Windows job
-# also builds the conversions (ULTRALIB_SEQUENCE_EXPORT=ON) and runs ctest.
-# Changes to documentation alone don't start a run.
+# Builds ultralib alone on Windows x64 with clang-cl whenever main changes. The job builds the conversions
+# (ULTRALIB_SEQUENCE_EXPORT=ON) and runs ctest. A push that changes only documentation starts no run.
 name: CI
 
 on:

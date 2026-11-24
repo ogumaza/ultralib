@@ -76,7 +76,7 @@ struct AlPlayerConfig
     bool oscillators = false;
 };
 
-// 2^(cents / 1200), by squares of a single-precision step, as libultra's alCents2Ratio.
+// 2^(cents / 1200), by squares of a single-precision step. libultra's alCents2Ratio works the same way.
 float CentsToRatio(int32_t cents);
 
 // The wave of a sound, with its addresses in the model's memory.

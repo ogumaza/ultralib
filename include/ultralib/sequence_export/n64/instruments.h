@@ -16,10 +16,9 @@
 #include <string>
 #include <vector>
 
+#include "ntdlib/sequence_export/performance_base.h"
 #include "seqlib/pcm.h"
 #include "seqlib/sfz/track_file.h"
-
-#include "ntdlib/sequence_export/performance_base.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -45,8 +44,8 @@ struct Lfo
     bool wheel = false; // CC1 scales the depth, and `depth` is what it comes to at 127
 };
 
-// A run of keys and velocities of an instrument that plays a wave one way. The envelope's fall times are the times
-// that a fall of 100 dB takes, as SoundFont counts them.
+// A run of keys and velocities of an instrument that plays a wave one way. The envelope's fall times are the times that
+// a fall of 100 dB takes. SoundFont counts them the same way.
 struct Zone
 {
     int low_key = 0;
@@ -92,9 +91,13 @@ struct PerformOptions
 
     // The name that the files' comments give the program.
     std::string program = "ntdlib";
+
+    // Whether the samples of the SoundFont and of the SFZ files go through the resampler's low-pass (ResamplerLowPass).
+    // Without it, they contain the waves as the game decodes them.
+    bool resampler_filter = true;
 };
 
-// The files of a converted sequence, its performance, and what the report needs.
+// The files of a converted sequence, its performance, and the counts and warnings for the report.
 struct Conversion
 {
     Performance performance;
@@ -107,8 +110,9 @@ struct Conversion
 };
 
 // Writes the MIDI file, the SoundFont and the SFZ files of `performance`. `title` names them. `program` goes in their
-// comments.
-Conversion BuildFiles(Performance performance, const std::string& title, const std::string& program);
+// comments. With `resampler_filter`, the samples go through the resampler's low-pass (PerformOptions).
+Conversion BuildFiles(Performance performance, const std::string& title, const std::string& program,
+                      bool resampler_filter = true);
 
 // The attenuation in centibels of an amplitude.
 double Centibels(double amplitude);

@@ -22,7 +22,7 @@ inline constexpr uint32_t kRdramSize8 = 0x800000;
 inline constexpr uint32_t kSpMemSize = 0x1000;
 inline constexpr uint32_t kPifRamSize = 0x40;
 
-// A byte's address in RDRAM, as the RCP's registers hold it: 24 bits.
+// A byte's address in RDRAM in the form that the RCP's registers hold: 24 bits.
 inline constexpr uint32_t kRdramAddressMask = 0xFFFFFF;
 
 // The RDRAM address in a DMA register of the SP, the DP, the AI or the SI: 24 bits, in 8-byte units.
@@ -105,7 +105,7 @@ inline constexpr uint32_t kIsViewerSize = 0x10000;
 // MI_MODE's repeat length, less one, in bytes.
 inline constexpr uint32_t kMiModeRepeatLength = 0x7F;
 
-// MI_MODE's repeat mode, which RDRAM register writes during IPL3 use.
+// MI_MODE's repeat mode. IPL3 uses it for its writes to the RDRAM registers.
 inline constexpr uint32_t kMiModeRepeat = 1u << 7;
 
 // The bit of a write to MI_MODE that clears the DP's interrupt.

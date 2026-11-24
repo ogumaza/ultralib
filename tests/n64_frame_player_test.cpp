@@ -2,7 +2,7 @@
 
 // Tests of the host's player of the Nintendo 64's sound engines, with a model made by hand. Each of the model's two
 // voices adds a constant to the dry bus. The expected values follow from the microcode's clear, load, mixer and
-// interleave commands, as the SDK's public abi.h gives them.
+// interleave commands. The SDK's public abi.h gives their forms.
 
 #include <array>
 #include <cstddef>

@@ -6,21 +6,21 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
+#include <functional>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <optional>
-#include <string>
+#include <set>
 #include <utility>
+#include <vector>
 
+#include "ntdlib/sequence_export/passes.h"
 #include "seqlib/midi/recorder.h"
 #include "xsflib/binary.h"
-#include "xsflib/bytes.h"
 
-#include "ultralib/n64/rom_data.h"
-#include "ultralib/n64/seq_file.h"
-#include "ultralib/n64/vadpcm.h"
+#include "rsp_audio.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -66,10 +66,6 @@ constexpr double kHalChannelScaleFull = 128.0;
 constexpr int kChannels = 16;
 constexpr int kPercussionChannel = 9;
 
-// A standard MIDI file's header, and each track's.
-constexpr std::size_t kMidiHeaderSize = 14;
-constexpr std::size_t kMidiTrackHeaderSize = 8;
-
 // The tempo that a sequence starts with, in microseconds a quarter note.
 constexpr float kDefaultTempo = 500000.0F;
 
@@ -90,8 +86,8 @@ constexpr int kAmbrellaBendCents = 200;
 constexpr uint8_t kAmbrellaChannelVolume = 100;
 constexpr int kAmbrellaFirstKey = 64;
 
-// The player's update lasts this long. Its oscillators step through a period in 16 / rate seconds. The bank's depths
-// scale CC1's value over 127 by 127 / 128 twice over.
+// The player's update lasts this long. Its oscillators step through a period in about 16.03 / rate seconds. The
+// conversion takes 16. The bank's depths scale CC1's value over 127 by 127 / 128 twice over.
 constexpr double kAmbrellaUpdateSeconds = 0.00575;
 constexpr double kAmbrellaLfoUnits = 16.0;
 constexpr double kAmbrellaWheelVibrato = 127.0 * 127.0 / (128.0 * 128.0);
@@ -115,6 +111,13 @@ constexpr double kCentreDb = -3.01;
 constexpr double kLineRampEarlyPlace = 0.5;
 constexpr double kLineRampLatePlace = 0.9;
 
+// The report's line for a note whose decay or release the fit of straight ramps approximates (ApplyLineRamps).
+constexpr const char* kLineRampsFitted = "straight-line decays and releases fitted to their top 20 dB";
+
+// A tick at an end in seconds that a conversion back from seconds overshoots by up to this share of a tick is that
+// tick.
+constexpr double kTickRounding = 1e-6;
+
 // A release in a straight line of amplitude falls like a line in decibels that takes this many times its time for 100
 // dB. That line falls 20 dB in the release's time. A longer one follows the top of the ramp more closely and adds a
 // tail that the game doesn't have. A shorter one falls too soon.
@@ -135,6 +138,110 @@ constexpr double kOscillatorDelayMs = 16.384;
 
 // The base of an oscillator's depth in cents: a vibrato's depth is this to the power of the bank's depth.
 constexpr double kVibratoDepthBase = 1.03099303;
+
+// The rules of the main loop's passes (ntdlib/sequence_export/passes.h). A program change sends the channel's volume
+// and pan at once, and the program goes out with the channel's next note. The settings that RestoreAtLoopStart sends
+// again therefore go ahead of the presets. The performer sends each track's notes to one part, with no part switches.
+const ntdlib::sequence_export::LoopRules kLoopRules{.seeded = {}, .preset_with_settings = false};
+
+// A setting of a channel's track: the channel and the kind of event.
+using ChannelSetting = std::pair<int, midi::EventKind>;
+
+// A main loop that starts at tick 0 contains the settings that the performer sends there for the game's set-up of each
+// channel. The game sets them once. A MIDI player that loops on the markers sends them again at each repeat, and a note
+// held across the loop's end plays with them where the game keeps the loop end's value. Moves each setting of `set_up`
+// to the sequence's first value of it, from `first_sends`, where no note plays with it before that value and the loop
+// ends with another value. The recorder leaves out a first value that equals the set-up value. The moved event replaces
+// it. A note of the loop with the set-up's value plays with the loop end's value in the game's next pass, and the pass
+// test then moves the loop to a later pass. Only a first pass that the time limit leaves untested keeps such a setting
+// at tick 0.
+void MoveSetUpInLoop(Performance& performance, const std::set<ChannelSetting>& set_up,
+                     const std::map<ChannelSetting, uint32_t>& first_sends)
+{
+    if (!performance.loop || performance.loop->start != 0)
+    {
+        return;
+    }
+
+    const std::map<ntdlib::sequence_export::SettingKey, midi::TrackEvent> at_end =
+        ntdlib::sequence_export::SettingsAt(performance, performance.loop->end);
+    for (const ChannelSetting& setting : set_up)
+    {
+        // A setting that the sequence never sends keeps the set-up value up to the end of the loop. A first value at
+        // tick 0 stays where it is.
+        const auto first = first_sends.find(setting);
+        if (first == first_sends.end())
+        {
+            continue;
+        }
+
+        const auto [channel, kind] = setting;
+        const uint32_t tick = first->second;
+        std::vector<midi::TrackEvent>& events = performance.tracks[static_cast<std::size_t>(channel)];
+        const auto of_kind = [kind](const midi::TrackEvent& e)
+        {
+            return e.kind == kind;
+        };
+        const auto set = std::ranges::find_if(events, of_kind);
+
+        const auto heard = [tick](const midi::TrackEvent& e)
+        {
+            return e.kind == midi::EventKind::kNoteOn && e.tick < tick;
+        };
+        if (set == events.end() || set->tick != 0 || std::ranges::any_of(events, heard))
+        {
+            continue;
+        }
+
+        const auto end = at_end.find({channel, set->part, kind});
+        if (end == at_end.end() || ntdlib::sequence_export::SameSetting(end->second, *set))
+        {
+            continue;
+        }
+
+        // The recorder puts a setting ahead of the notes and programs at the same tick. The moved setting goes in the
+        // same place, at the tick of the first value.
+        midi::TrackEvent moved = *set;
+        moved.tick = tick;
+        events.erase(set);
+        const auto sent_there = [&moved](const midi::TrackEvent& e)
+        {
+            return e.tick == moved.tick && e.kind == moved.kind && e.part == moved.part;
+        };
+        const auto after = [&moved](const midi::TrackEvent& e)
+        {
+            return e.tick > moved.tick ||
+                   (e.tick == moved.tick && (e.kind == midi::EventKind::kNoteOn || e.kind == midi::EventKind::kPreset));
+        };
+        if (std::ranges::none_of(events, sent_there))
+        {
+            events.insert(std::ranges::find_if(events, after), moved);
+        }
+    }
+}
+
+// The envelope that `player` plays for a sound with `envelope`. Ambrella's player starts a note at its top and only
+// acts on a fall to nothing.
+n64::BankEnvelope PlayedEnvelope(n64::BankEnvelope envelope, LibultraPlayer player)
+{
+    if (player == LibultraPlayer::kAmbrella)
+    {
+        const bool falls = envelope.decay_time != 0 && envelope.decay_volume == 0;
+        envelope.attack_time = 0;
+        envelope.attack_volume = 127;
+        envelope.decay_time = falls ? envelope.decay_time : 0;
+        envelope.decay_volume = falls ? 0 : 127;
+    }
+
+    return envelope;
+}
+
+// True if the fit of straight ramps (ApplyLineRamps) approximates a ramp of `envelope`: a decay that falls, or a
+// release. Its attack is exact.
+bool FitsLineRamps(const n64::BankEnvelope& envelope)
+{
+    return (envelope.decay_time > 0 && envelope.decay_volume < envelope.attack_volume) || envelope.release_time > 0;
+}
 
 // A channel's sound in a player. A voice whose sound has no release ends at once.
 struct Voice
@@ -189,6 +296,8 @@ public:
 private:
     void SetTempo(uint32_t tick, float tempo);
     double SecondsAt(uint32_t tick) const;
+    uint32_t TickAt(double seconds) const;
+    void SendSetting(int channel, uint32_t tick, midi::EventKind kind, uint8_t value);
     void SetInstrument(int channel, int32_t instrument, uint32_t tick);
     void HandleEvent(int track, const n64::MidiEvent& event, uint32_t tick);
     void HandleChannelMessage(const n64::MidiEvent& event, uint32_t tick);
@@ -196,6 +305,9 @@ private:
     void HandleNoteOff(int channel, int key, uint32_t tick);
     bool HandleLoopEnd(TrackState& state, const n64::MidiEvent& event, uint32_t tick);
     void PlanLoop();
+    bool PlaysAnotherPass();
+    std::function<bool(uint32_t, uint32_t)> PlayOn(uint32_t until);
+    void Play();
     double ReleaseMs(int32_t instrument) const;
     void Finish(uint32_t tick);
     void SendExpression(int channel, uint32_t tick);
@@ -242,10 +354,25 @@ private:
 
     std::vector<TempoSegment> tempo_;
 
-    // Where the performance stops, once every track has ended or found its loop.
+    // Where the performance stops, once every track has ended or found its loop: the end of the main loop's pass that
+    // plays now. A copy that plays on (PlayOn) stops at the tick it's given.
     std::optional<uint32_t> stop_tick_;
-    std::optional<midi::Performance::Loop> loop_;
+    uint32_t tick_ = 0;
     double last_release_end_ = 0.0;
+
+    // The main loop: the start of its first pass, the length of a pass, and the passes counted and marked. A copy plays
+    // on without counting passes. `played_on_` is the last copy's performance. It holds the pass after the marked one.
+    uint32_t loop_start_ = 0;
+    uint32_t loop_length_ = 0;
+    ntdlib::sequence_export::MainLoopPasses main_loop_{std::vector<ntdlib::sequence_export::LoopChoice>{}};
+    bool copy_ = false;
+    std::shared_ptr<const Performance> played_on_;
+
+    // The settings that the performer sends at tick 0 for the game's set-up of each channel, and the tick of the
+    // sequence's first value of each setting.
+    bool setting_up_ = true;
+    std::set<ChannelSetting> set_up_;
+    std::map<ChannelSetting, uint32_t> first_sends_;
 };
 
 void Performer::SetTempo(uint32_t tick, float tempo)
@@ -268,6 +395,30 @@ double Performer::SecondsAt(uint32_t tick) const
     return last.seconds + (static_cast<double>(tick) - last.tick) * last.uspt / 1000000.0;
 }
 
+uint32_t Performer::TickAt(double seconds) const
+{
+    // The segment that holds `seconds`: the last one that starts at or before it.
+    const auto after = std::ranges::upper_bound(tempo_, seconds, {}, &TempoSegment::seconds);
+    const TempoSegment& segment = after == tempo_.begin() ? tempo_.front() : *std::prev(after);
+    const double ticks = (seconds - segment.seconds) * 1000000.0 / segment.uspt;
+
+    return segment.tick + static_cast<uint32_t>(std::max(std::ceil(ticks - kTickRounding), 0.0));
+}
+
+void Performer::SendSetting(int channel, uint32_t tick, midi::EventKind kind, uint8_t value)
+{
+    if (setting_up_)
+    {
+        set_up_.insert({channel, kind});
+    }
+    else
+    {
+        first_sends_.try_emplace({channel, kind}, tick);
+    }
+
+    recorder_.SendSetting(out_.performance, outputs_[static_cast<std::size_t>(channel)], tick, kind, value);
+}
+
 void Performer::SetInstrument(int channel, int32_t instrument, uint32_t tick)
 {
     const n64::BankInstrument& object = file_.instruments[static_cast<std::size_t>(instrument)];
@@ -279,9 +430,8 @@ void Performer::SetInstrument(int channel, int32_t instrument, uint32_t tick)
 
     bend_ranges_[static_cast<std::size_t>(channel)] = object.bend_range;
 
-    midi::TrackOutput& output = outputs_[static_cast<std::size_t>(channel)];
-    recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kVolume, object.volume);
-    recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kPan, object.pan);
+    SendSetting(channel, tick, midi::EventKind::kVolume, object.volume);
+    SendSetting(channel, tick, midi::EventKind::kPan, object.pan);
 }
 
 double Performer::ReleaseMs(int32_t instrument) const
@@ -337,12 +487,12 @@ void Performer::SendExpression(int channel, uint32_t tick)
 {
     // The mixer takes the send's share from the dry level, on the sin/cos law. The controller acts squared.
     const std::size_t index = static_cast<std::size_t>(channel);
-    const double dry = std::cos(std::numbers::pi / 2.0 * effects_[index] / 127.0);
+    const double dry = DryShare(effects_[index]);
     const double expression = settings_.player == LibultraPlayer::kHal
                                   ? hal_player_scale_ * hal_channel_scales_[index] / kHalChannelScaleFull
                                   : expressions_[index];
-    recorder_.SendSetting(out_.performance, outputs_[index], tick, midi::EventKind::kExpression,
-                          static_cast<uint8_t>(std::lround(expression * std::sqrt(dry))));
+    SendSetting(channel, tick, midi::EventKind::kExpression,
+                static_cast<uint8_t>(std::lround(expression * std::sqrt(dry))));
 }
 
 void Performer::SendPitch(int channel, uint32_t tick)
@@ -414,8 +564,14 @@ void Performer::HandleNoteOn(int channel, int key, int velocity, uint32_t durati
         StartSweep(channel, key, tick);
     }
 
-    // A program goes out with its channel's first note. A program that plays no note then stays out of the SoundFont.
+    // CC91 goes out before a part's first note, at the channel's effect send: 0 until the sequence sets one, and 0
+    // where the game has no effect bus. A later note sends nothing more unless the send has changed. A synth that
+    // follows General MIDI 2 gives a channel without CC91 a send of 40.
     midi::TrackOutput& output = outputs_[index];
+    const int send = settings_.effect == n64::AlEffect::kNone ? 0 : effects_[index];
+    SendSetting(channel, tick, midi::EventKind::kReverb, static_cast<uint8_t>(send));
+
+    // A program goes out with its channel's first note. A program that plays no note then stays out of the SoundFont.
     recorder_.SendPreset(out_.performance, output, tick, midi::PresetIndex(out_.instruments, instruments_[index]));
     const uint32_t note =
         recorder_.NoteOn(out_.performance, output, tick, static_cast<uint8_t>(key), static_cast<uint8_t>(velocity));
@@ -423,6 +579,12 @@ void Performer::HandleNoteOn(int channel, int key, int velocity, uint32_t durati
     const bool ends_at_once =
         envelope == n64::kNoObject || file_.envelopes[static_cast<std::size_t>(envelope)].release_time == 0;
     voices_[index].push_back({key, note, output.part, ends_at_once});
+    if (settings_.line_ramps && envelope != n64::kNoObject &&
+        FitsLineRamps(PlayedEnvelope(file_.envelopes[static_cast<std::size_t>(envelope)], settings_.player)))
+    {
+        recorder_.Approximate(kLineRampsFitted);
+    }
+
     if (duration != 0)
     {
         pending_offs_.insert({tick + duration, {channel, key}});
@@ -476,7 +638,6 @@ void Performer::HandleChannelMessage(const n64::MidiEvent& event, uint32_t tick)
 {
     const int channel = event.status & kChannelMask;
     const std::size_t index = static_cast<std::size_t>(channel);
-    midi::TrackOutput& output = outputs_[index];
     switch (event.status & kStatusMask)
     {
     case kNoteOn:
@@ -498,7 +659,7 @@ void Performer::HandleChannelMessage(const n64::MidiEvent& event, uint32_t tick)
             switch (event.data1)
             {
             case kControlWheel:
-                recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kModulation, event.data2);
+                SendSetting(channel, tick, midi::EventKind::kModulation, event.data2);
                 break;
 
             case kControlExpression:
@@ -539,31 +700,29 @@ void Performer::HandleChannelMessage(const n64::MidiEvent& event, uint32_t tick)
         switch (event.data1)
         {
         case kControlVolume:
-            recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kVolume, event.data2);
+            SendSetting(channel, tick, midi::EventKind::kVolume, event.data2);
             break;
 
         case kControlPan:
-            recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kPan, event.data2);
+            SendSetting(channel, tick, midi::EventKind::kPan, event.data2);
             break;
 
         case kControlSustain:
-            recorder_.SendSetting(out_.performance, output, tick, midi::ControlKind(kControlSustain), event.data2);
+            SendSetting(channel, tick, midi::ControlKind(kControlSustain), event.data2);
             break;
 
         case kControlEffect:
             effects_[index] = event.data2;
             SendExpression(channel, tick);
-            if (settings_.effect != BusEffect::kNone)
+            if (settings_.effect != n64::AlEffect::kNone)
             {
-                recorder_.SendSetting(out_.performance, output, tick, midi::EventKind::kReverb, event.data2);
+                SendSetting(channel, tick, midi::EventKind::kReverb, event.data2);
             }
-
             break;
 
         default:
             break;
         }
-
         break;
 
     case kProgramChange:
@@ -571,7 +730,6 @@ void Performer::HandleChannelMessage(const n64::MidiEvent& event, uint32_t tick)
         {
             SetInstrument(channel, bank_.instruments[event.data1], tick);
         }
-
         break;
 
     case kPitchBend:
@@ -665,20 +823,79 @@ void Performer::PlanLoop()
         return;
     }
 
-    const uint64_t end = start + length * static_cast<uint64_t>(options_.loops);
-    if (end >= UINT32_MAX || SecondsAt(static_cast<uint32_t>(start + length)) > kLongestSeconds)
+    // The pass choice counts up to twice --loops passes, and a copy of the performer plays two more (ChooseSteadyPass).
+    const uint64_t passes = 2 * static_cast<uint64_t>(std::max(options_.loops, 1)) + 2;
+    if (start + length * passes >= UINT32_MAX || SecondsAt(static_cast<uint32_t>(start + length)) > kLongestSeconds)
     {
         return;
     }
 
-    stop_tick_ = static_cast<uint32_t>(end);
-    loop_ = midi::Performance::Loop{start, static_cast<uint32_t>(start + length)};
+    // The performance stops at the end of each pass, to count it.
+    loop_start_ = start;
+    loop_length_ = static_cast<uint32_t>(length);
+    stop_tick_ = static_cast<uint32_t>(start + length);
+    main_loop_.Restart(out_.performance, std::pair<int, uint32_t>{0, start});
+}
+
+// Counts the pass of the main loop that ends at the stop tick, and returns true if the performance plays another pass.
+// Once the performance has played --loops passes, the pass rules mark the first pass that a MIDI player can repeat as
+// the game plays the passes after it (MainLoopPasses::MarkSteadyPass). The performance plays on until --loops passes
+// follow the marked one, or until the time limit cuts it.
+bool Performer::PlaysAnotherPass()
+{
+    Performance& performance = out_.performance;
+    const uint32_t end = *stop_tick_;
+    main_loop_.CountPass(performance, std::pair<int, uint32_t>{0, loop_start_}, end - loop_length_, end);
+    if (performance.loops >= options_.loops)
+    {
+        const auto play_on = [this](uint32_t until)
+        {
+            return PlayOn(until);
+        };
+        if (main_loop_.MarkSteadyPass(performance, std::nullopt, options_.loops, play_on))
+        {
+            return false;
+        }
+    }
+
+    stop_tick_ = end + loop_length_;
+
+    return true;
+}
+
+// Plays a copy of the performer on, up to tick `until`, without counting passes and without the time limit: a pass that
+// the limit would cut can still show which pass repeats. Returns the test of whether the copy's pass from a start to an
+// end plays as the pass after it (RepeatsAsTheGame). The performer draws no random numbers. The copy's performance
+// stays in `played_on_`.
+std::function<bool(uint32_t, uint32_t)> Performer::PlayOn(uint32_t until)
+{
+    Performer copy = *this;
+    copy.copy_ = true;
+    copy.stop_tick_ = until;
+    copy.Play();
+
+    const auto played = std::make_shared<const Performance>(std::move(copy.out_.performance));
+    played_on_ = played;
+
+    return [played](uint32_t start, uint32_t end)
+    {
+        return ntdlib::sequence_export::RepeatsAsTheGame(*played, {}, start, end, kLoopRules);
+    };
 }
 
 void Performer::Finish(uint32_t tick)
 {
     Performance& performance = out_.performance;
     const double sound_end = last_release_end_;
+
+    // A main loop in which no note starts, once every note before it has ended, sounds nothing. It's no loop. The
+    // performance ends with its last sound, and what comes after that can't be heard.
+    const auto no_voice = [](const std::vector<Voice>& voices)
+    {
+        return voices.empty();
+    };
+    const bool silent_loop =
+        performance.loop && std::ranges::all_of(voices_, no_voice) && !midi::StartsNote(performance, loop_start_);
 
     // A note that's still on stops where the performance stops.
     for (int channel = 0; channel < kChannels; channel++)
@@ -690,15 +907,28 @@ void Performer::Finish(uint32_t tick)
         }
     }
 
-    if (loop_)
+    if (silent_loop)
     {
-        // The next pass starts at the end of the last. What it plays stays out, and the notes stop there.
-        midi::ClampNoteOffs(performance, tick);
-        midi::CutAt(performance, tick);
-        performance.loop = loop_;
-        performance.loops = options_.loops;
+        const uint32_t end = TickAt(sound_end);
+        midi::EndAt(performance, end);
+        performance.DropLoop();
+        performance.end_tick = end;
+        performance.seconds = sound_end;
+    }
+    else if (performance.loop)
+    {
+        // The next pass starts at the end of the last. What it plays stays out, and the notes stop there. The game's
+        // pass after the marked one is in the copy that played on: the performance stops before it.
+        midi::EndPassAt(performance, tick);
         performance.end_tick = tick;
         performance.seconds = SecondsAt(tick);
+        MoveSetUpInLoop(performance, set_up_, first_sends_);
+        if (played_on_)
+        {
+            const ntdlib::sequence_export::PassStart next_pass =
+                ntdlib::sequence_export::PassStartAt(*played_on_, {}, performance.loop->end);
+            ntdlib::sequence_export::RestoreAtLoopStart(performance, {}, next_pass, kLoopRules);
+        }
     }
     else
     {
@@ -741,7 +971,6 @@ void Performer::HandleEvent(int track, const n64::MidiEvent& event, uint32_t tic
             {
                 state.index++;
             }
-
             break;
 
         default:
@@ -757,7 +986,7 @@ void Performer::HandleEvent(int track, const n64::MidiEvent& event, uint32_t tic
     else if (settings_.player == LibultraPlayer::kAmbrella && (event.status & kStatusMask) == kControlChange &&
              event.data1 == kControlLoopEnd && state.loop_start_index)
     {
-        // The player ends every note that's on. From the fourth repeat, it plays each repeat but every third with a
+        // The player ends every note that's on. From the sixth pass on, it plays two passes of every three with a
         // random set of the channels 9 to 16. The loop in the file is the song as it first plays.
         for (int channel = 0; channel < kChannels; channel++)
         {
@@ -821,9 +1050,11 @@ LibultraPerformance Performer::Run()
         {
             bend_ranges_[index] = kAmbrellaBendCents;
             last_keys_[index] = kAmbrellaFirstKey;
-            recorder_.SendSetting(performance, outputs_[index], 0, midi::EventKind::kVolume, kAmbrellaChannelVolume);
+            SendSetting(channel, 0, midi::EventKind::kVolume, kAmbrellaChannelVolume);
         }
     }
+
+    setting_up_ = false;
 
     tracks_.resize(song_.tracks.size());
     for (std::size_t i = 0; i < song_.tracks.size(); i++)
@@ -838,7 +1069,15 @@ LibultraPerformance Performer::Run()
         }
     }
 
-    uint32_t tick = 0;
+    Play();
+    Finish(tick_);
+
+    return std::move(out_);
+}
+
+void Performer::Play()
+{
+    Performance& performance = out_.performance;
     while (true)
     {
         // The lowest track with the nearest event goes next. A note's end at the same tick goes before it.
@@ -860,13 +1099,21 @@ LibultraPerformance Performer::Run()
         {
             const auto [off_tick, off] = *pending_offs_.begin();
             pending_offs_.erase(pending_offs_.begin());
-            tick = std::max(tick, off_tick);
+            tick_ = std::max(tick_, off_tick);
             HandleNoteOff(off.channel, off.key, off_tick);
+        }
+
+        // At the end of a pass of the main loop, the notes that end before it have ended, and the events of the stop
+        // tick belong to the next pass. The performer counts the pass there and plays another, or stops. A copy that
+        // plays on stops where it was told to.
+        if (stopped && !copy_ && PlaysAnotherPass())
+        {
+            continue;
         }
 
         if (settings_.player == LibultraPlayer::kAmbrella)
         {
-            RunSweeps(next_tick != UINT32_MAX ? next_tick : stop_tick_.value_or(tick));
+            RunSweeps(next_tick != UINT32_MAX ? next_tick : stop_tick_.value_or(tick_));
         }
 
         if (next < 0)
@@ -876,12 +1123,12 @@ LibultraPerformance Performer::Run()
 
         if (stopped)
         {
-            tick = *stop_tick_;
+            tick_ = *stop_tick_;
             break;
         }
 
-        tick = next_tick;
-        if (SecondsAt(tick) > kLongestSeconds)
+        tick_ = next_tick;
+        if (!copy_ && SecondsAt(tick_) > kLongestSeconds)
         {
             performance.truncated = true;
             break;
@@ -889,12 +1136,9 @@ LibultraPerformance Performer::Run()
 
         TrackState& state = tracks_[static_cast<std::size_t>(next)];
         const std::vector<n64::MidiEvent>& events = song_.tracks[static_cast<std::size_t>(next)];
-        HandleEvent(next, events[state.index], tick);
+        HandleEvent(next, events[state.index], tick_);
         PlanLoop();
     }
-
-    Finish(tick);
-    return std::move(out_);
 }
 
 // The times of a zone's envelope on a library whose ramps are straight lines in amplitude. SoundFont's and SFZ's
@@ -980,8 +1224,8 @@ void ApplyEnvelope(Zone& zone, const n64::BankEnvelope& envelope, double before_
     }
 
     // A release falls from where the note stands to the floor in the release's time. A fall to the floor has no sustain
-    // to start from. A note of that kind usually ends well before its decay's end, so the fit takes the release from
-    // the top.
+    // to start from. A note of that kind usually ends well before its decay's end. The fit therefore takes the release
+    // from the top.
     const double release_range_db = decay_ms > 0.0 && decay == 0.0 ? range_db : std::max(range_db - sustain_db, 1.0);
     zone.release_ms = release_ms * 100.0 / release_range_db;
 }
@@ -1073,132 +1317,7 @@ std::vector<VelocityRun> RunsOfKey(const n64::BankFile& file, const n64::BankIns
     return runs;
 }
 
-std::string HexName(uint32_t value)
-{
-    char name[16];
-    std::snprintf(name, sizeof(name), "w%08X", value);
-
-    return name;
-}
-
-// Takes a track's events from a compressed MIDI file or a standard one.
-LibultraSong ReadSong(std::span<const uint8_t> bytes)
-{
-    LibultraSong song;
-    if (n64::CompressedMidi::Matches(bytes))
-    {
-        const n64::CompressedMidi file = n64::CompressedMidi::Parse(bytes);
-        song.division = file.Division();
-        for (std::size_t track = 0; track < n64::CompressedMidi::kTrackCount; track++)
-        {
-            song.tracks.push_back(file.DecodeTrack(track));
-        }
-    }
-    else
-    {
-        const n64::StandardMidi file = n64::StandardMidi::Parse(bytes);
-        song.division = file.Division();
-        for (std::size_t track = 0; track < file.TrackCount(); track++)
-        {
-            song.tracks.push_back(file.DecodeTrack(track));
-        }
-    }
-
-    return song;
-}
-
-// The volume that the game gives its player for song `index`.
-int SongVolume(std::span<const uint8_t> image, const LibultraProfile& profile, std::size_t index)
-{
-    if (index < profile.volume_list.size())
-    {
-        return profile.volume_list[index];
-    }
-
-    const SongVolumes& table = profile.volumes;
-    if (table.stride == 0)
-    {
-        return profile.volume;
-    }
-
-    if (index >= table.count)
-    {
-        return table.other;
-    }
-
-    const std::size_t place = table.offset + index * table.stride;
-    if (place + 2 > image.size())
-    {
-        return table.other;
-    }
-
-    return xsflib::LoadBe16(image.data() + place);
-}
-
-// The volume that Hudson's sound code gives the player for a song's volume byte v, read as signed: (v << 8) + 0xFF, or
-// nothing for v <= 0. In Eleven Beat, the function at 0x80004268 reads the byte from the song's record, and the
-// function at 0x80003358 makes the volume.
-int HudsonVolume(uint8_t byte)
-{
-    const int value = static_cast<int8_t>(byte);
-    return value > 0 ? (value << 8) + 0xFF : 0;
-}
-
 } // namespace
-
-std::shared_ptr<const Wave> DecodeWave(std::span<const uint8_t> bytes, const n64::VadpcmBook* book,
-                                       const n64::BankLoop* loop, std::string name, uint32_t rate)
-{
-    auto out = std::make_shared<Wave>();
-    out->name = std::move(name);
-    out->rate = rate;
-    std::vector<int16_t> samples;
-    if (book != nullptr)
-    {
-        samples = n64::DecodeVadpcm(bytes, *book);
-    }
-    else
-    {
-        samples.reserve(bytes.size() / 2);
-        for (std::size_t i = 0; i + 1 < bytes.size(); i += 2)
-        {
-            samples.push_back(static_cast<int16_t>(xsflib::LoadBe16(bytes.data() + i)));
-        }
-    }
-
-    if (loop != nullptr && loop->count != 0 && loop->end > loop->start && loop->end <= samples.size())
-    {
-        // A VADPCM wave's repeats start from the state that the loop holds, at the frame of the loop's start. Where
-        // they differ from the first pass, the file keeps one pass more.
-        samples.resize(loop->end);
-        out->pcm.loop = true;
-        out->pcm.loop_start = loop->start;
-        out->pcm.loop_end = loop->end;
-        if (book != nullptr && loop->has_state)
-        {
-            const std::size_t first_frame = loop->start / n64::kVadpcmFrameSamples;
-            n64::VadpcmState state = loop->state;
-            const std::vector<int16_t> rest =
-                n64::DecodeVadpcm(bytes.subspan((first_frame + 1) * n64::kVadpcmFrameSize), *book, state);
-            std::vector<int16_t> repeat(loop->state.begin(), loop->state.end());
-            repeat.insert(repeat.end(), rest.begin(), rest.end());
-            const std::size_t skip = loop->start - first_frame * n64::kVadpcmFrameSamples;
-            const std::size_t length = loop->end - loop->start;
-            if (repeat.size() >= skip + length &&
-                !std::equal(samples.begin() + loop->start, samples.end(), repeat.begin() + static_cast<long>(skip)))
-            {
-                samples.insert(samples.end(), repeat.begin() + static_cast<long>(skip),
-                               repeat.begin() + static_cast<long>(skip + length));
-                out->pcm.loop_start = loop->end;
-                out->pcm.loop_end = loop->end + static_cast<uint32_t>(length);
-            }
-        }
-    }
-
-    out->pcm.channels.push_back(std::move(samples));
-
-    return out;
-}
 
 LibultraPerformance PerformLibultra(const LibultraSong& song, const n64::BankFile& file, const n64::Bank& bank,
                                     const LibultraSettings& settings, const PerformOptions& options)
@@ -1238,43 +1357,23 @@ std::vector<Zone> LibultraZones(const n64::BankFile& file, int32_t index, const 
         const int detune = ambrella ? -map.detune : map.detune;
         zone.tune_cents = detune;
         zone.pan = std::clamp((sound.pan - 64) / 64.0, -1.0, 1.0);
-        n64::BankEnvelope envelope = file.envelopes[static_cast<std::size_t>(sound.envelope)];
         if (ambrella)
         {
-            // The player starts a note at its top and only acts on a fall to nothing.
-            const bool falls = envelope.decay_time != 0 && envelope.decay_volume == 0;
-            envelope.attack_time = 0;
-            envelope.attack_volume = 127;
-            envelope.decay_time = falls ? envelope.decay_time : 0;
-            envelope.decay_volume = falls ? 0 : 127;
             ApplyAmbrellaWheel(zone, instrument);
         }
 
+        const n64::BankEnvelope envelope =
+            PlayedEnvelope(file.envelopes[static_cast<std::size_t>(sound.envelope)], settings.player);
         ApplyEnvelope(zone, envelope, before_envelope, settings.line_ramps);
         if (settings.oscillators)
         {
             ApplyOscillators(zone, instrument);
         }
 
-        // Keys past the resampler's limit play at the limit.
-        const int limit_key = (map.key_base * 100 + kOctaveCents - detune + 99) / 100;
-        if (low_key < limit_key)
-        {
-            zone.low_key = low_key;
-            zone.high_key = std::min(high_key, limit_key - 1);
-            zones.push_back(zone);
-            wave_of_zone.push_back(sound.wave);
-        }
-
-        if (high_key >= limit_key)
-        {
-            zone.low_key = std::max(low_key, limit_key);
-            zone.high_key = high_key;
-            zone.follows_key = false;
-            zone.tune_cents = kOctaveCents;
-            zones.push_back(zone);
-            wave_of_zone.push_back(sound.wave);
-        }
+        zone.low_key = low_key;
+        zone.high_key = high_key;
+        AddUpToResamplerLimit(zones, zone, (map.key_base * 100 + kOctaveCents - detune + 99) / 100, kOctaveCents);
+        wave_of_zone.resize(zones.size(), sound.wave);
     };
 
     int low_key = 0;
@@ -1295,283 +1394,6 @@ std::vector<Zone> LibultraZones(const n64::BankFile& file, int32_t index, const 
     }
 
     return zones;
-}
-
-std::unique_ptr<LibultraGame> LibultraGame::Open(std::span<const uint8_t> image, const LibultraProfile* profile)
-{
-    std::unique_ptr<LibultraGame> game(new LibultraGame());
-    game->image_ = image;
-    if (profile != nullptr)
-    {
-        game->profile_ = *profile;
-    }
-    else
-    {
-        // Without a profile, the largest sequence file and the bank with the most instruments.
-        const n64::FoundFiles found = n64::FindFiles(image);
-        std::size_t best_songs = 0;
-        for (const std::size_t offset : found.sequence_banks)
-        {
-            const n64::SeqFile file = n64::SeqFile::Parse(image.subspan(offset));
-            std::size_t songs = 0;
-            for (std::size_t i = 0; i < file.Entries().size(); i++)
-            {
-                const std::span<const uint8_t> bytes = file.Sequence(i);
-                songs += n64::CompressedMidi::Matches(bytes) || n64::StandardMidi::Matches(bytes) ? 1 : 0;
-            }
-
-            if (songs > best_songs)
-            {
-                best_songs = songs;
-                game->profile_.sequences = offset;
-            }
-        }
-
-        std::size_t best_instruments = 0;
-        for (const std::size_t offset : found.bank_files)
-        {
-            const n64::BankFile file = n64::BankFile::Parse(image.subspan(offset));
-            if (file.instruments.size() > best_instruments)
-            {
-                best_instruments = file.instruments.size();
-                game->profile_.bank = offset;
-            }
-        }
-
-        if (best_songs == 0 || best_instruments == 0)
-        {
-            return nullptr;
-        }
-    }
-
-    if (game->profile_.midi_files != 0)
-    {
-        // A file ends where its only track ends.
-        std::size_t place = game->profile_.sequences;
-        for (std::size_t i = 0; i < game->profile_.midi_files; i++)
-        {
-            if (place + kMidiHeaderSize + kMidiTrackHeaderSize > image.size())
-            {
-                throw xsflib::FormatError("the game's MIDI files run past the image");
-            }
-
-            const std::size_t size =
-                kMidiHeaderSize + kMidiTrackHeaderSize + xsflib::LoadBe32(image.data() + place + kMidiHeaderSize + 4);
-            const std::span<const uint8_t> bytes = image.subspan(place, size);
-            game->songs_.emplace_back(bytes.begin(), bytes.end());
-            place += size;
-        }
-    }
-    else if (game->profile_.rare_sequences)
-    {
-        const std::optional<std::size_t> place = n64::FindRareSequences(image);
-        if (!place)
-        {
-            throw xsflib::FormatError("the game's table of sequences can't be found");
-        }
-
-        const n64::RareSequenceTable table = n64::RareSequenceTable::Parse(image.subspan(*place));
-        for (std::size_t i = 0; i < table.entries.size(); i++)
-        {
-            game->songs_.push_back(table.Sequence(i));
-        }
-    }
-    else
-    {
-        const std::span<const uint8_t> file = image.subspan(game->profile_.sequences);
-        const bool hudson = game->profile_.hudson_sequences;
-        const n64::SeqFile sequences =
-            n64::SeqFile::Parse(file, hudson ? n64::kHudsonSeqFileRevision : n64::kSeqFileRevision);
-        if (hudson)
-        {
-            game->records_ = n64::ReadHudsonRecords(file);
-        }
-
-        for (const n64::SeqFile::Entry& entry : sequences.Entries())
-        {
-            const std::span<const uint8_t> bytes = image.subspan(game->profile_.sequences + entry.offset, entry.length);
-            game->songs_.emplace_back(bytes.begin(), bytes.end());
-        }
-    }
-
-    game->banks_.push_back(game->ReadBanks(game->profile_.bank));
-    for (const LibultraSongSet& set : game->profile_.other_sets)
-    {
-        game->banks_.push_back(game->ReadBanks(set.bank));
-    }
-
-    for (std::size_t i = 0; i < game->records_.size(); i++)
-    {
-        if (game->records_[i].bank >= game->banks_[0].file.banks.size())
-        {
-            throw xsflib::FormatError("song " + std::to_string(i) + " plays bank " +
-                                      std::to_string(game->records_[i].bank) + ", which the bank file doesn't hold");
-        }
-    }
-
-    return game;
-}
-
-LibultraGame::Banks LibultraGame::ReadBanks(std::size_t offset) const
-{
-    Banks banks;
-    banks.file = n64::BankFile::Parse(image_.subspan(offset));
-    if (profile_.program_bend_range != 0)
-    {
-        for (const n64::Bank& bank : banks.file.banks)
-        {
-            for (const int32_t object : bank.instruments)
-            {
-                if (object != n64::kNoObject)
-                {
-                    banks.file.instruments[static_cast<std::size_t>(object)].bend_range =
-                        static_cast<int16_t>(profile_.program_bend_range);
-                }
-            }
-        }
-    }
-
-    const std::optional<std::size_t> samples = n64::FindBankSamples(image_, banks.file);
-    if (!samples)
-    {
-        throw xsflib::FormatError("the place of the bank's samples can't be found");
-    }
-
-    banks.samples = *samples;
-
-    return banks;
-}
-
-std::size_t LibultraGame::SetSize(const LibultraSongSet& set) const
-{
-    const std::size_t first = std::min(set.first_song, songs_.size());
-    return set.song_count != 0 ? std::min(set.song_count, songs_.size() - first) : songs_.size() - first;
-}
-
-std::vector<ntdlib::sequence_export::Sequence> LibultraGame::Sequences() const
-{
-    // The songs that the profile lists, by their numbers in the file.
-    const std::size_t first = std::min(profile_.first_song, songs_.size());
-    const std::size_t end =
-        profile_.song_count != 0 ? std::min(first + profile_.song_count, songs_.size()) : songs_.size();
-    std::vector<ntdlib::sequence_export::Sequence> sequences;
-    for (std::size_t i = first; i < end; i++)
-    {
-        sequences.push_back({i, SequenceName(i, profile_.names)});
-    }
-
-    std::size_t index = songs_.size();
-    for (const LibultraRateChange& change : profile_.rate_changes)
-    {
-        sequences.push_back({index++, SequenceName(change.song, profile_.names, change.beside)});
-    }
-
-    for (const LibultraSongSet& set : profile_.other_sets)
-    {
-        for (std::size_t i = 0; i < SetSize(set); i++)
-        {
-            sequences.push_back({index++, SequenceName(set.first_song + i, profile_.names, set.name)});
-        }
-    }
-
-    return sequences;
-}
-
-std::shared_ptr<const Wave> LibultraGame::WaveAt(Banks& banks, int32_t index) const
-{
-    const auto found = banks.waves.find(index);
-    if (found != banks.waves.end())
-    {
-        return found->second;
-    }
-
-    const n64::BankFile& file = banks.file;
-    const n64::BankWave& wave = file.waves[static_cast<std::size_t>(index)];
-    const n64::BankLoop* loop =
-        wave.loop == n64::kNoObject ? nullptr : &file.loops[static_cast<std::size_t>(wave.loop)];
-    const n64::VadpcmBook* book =
-        wave.type == n64::kWaveVadpcm ? &file.books.at(static_cast<std::size_t>(wave.book)).book : nullptr;
-    // FindBankSamples checks only the first loops of a bank. A wave further on can run past the image.
-    const std::size_t start = banks.samples + wave.base;
-    if (start > image_.size() || wave.length > image_.size() - start)
-    {
-        throw xsflib::FormatError("a wave of the bank runs past the image");
-    }
-
-    std::shared_ptr<const Wave> out =
-        DecodeWave(image_.subspan(start, wave.length), book, loop, HexName(wave.base), profile_.output_rate);
-    banks.waves[index] = out;
-
-    return out;
-}
-
-Conversion LibultraGame::Convert(std::size_t index, const PerformOptions& options)
-{
-    // A rate change's track comes after the songs, and the other sets' songs after the rate changes.
-    const LibultraRateChange* change = nullptr;
-    std::size_t song_index = index;
-    std::size_t set_index = 0;
-    const char* beside = nullptr;
-    if (index >= songs_.size() && index - songs_.size() < profile_.rate_changes.size())
-    {
-        change = &profile_.rate_changes[index - songs_.size()];
-        song_index = change->song;
-        beside = change->beside;
-    }
-    else if (index >= songs_.size())
-    {
-        std::size_t place = index - songs_.size() - profile_.rate_changes.size();
-        for (const LibultraSongSet& set : profile_.other_sets)
-        {
-            set_index++;
-            if (place < SetSize(set))
-            {
-                song_index = set.first_song + place;
-                beside = set.name;
-                break;
-            }
-            place -= SetSize(set);
-        }
-    }
-
-    const LibultraSong song = ReadSong(songs_.at(song_index));
-    Banks& banks = banks_.at(set_index);
-
-    // Hudson's sequence bank gives each song its bank and its volume.
-    const n64::HudsonSongRecord* record = records_.empty() ? nullptr : &records_.at(song_index);
-    const n64::Bank& bank = banks.file.banks.at(record != nullptr ? record->bank : 0);
-
-    LibultraSettings settings;
-    settings.player = profile_.player;
-    settings.line_ramps = profile_.line_ramps;
-    settings.volume = record != nullptr ? HudsonVolume(record->volume) : SongVolume(image_, profile_, song_index);
-    settings.oscillators = profile_.oscillators;
-    settings.effect = profile_.effect;
-    if (change != nullptr)
-    {
-        settings.rate = change->rate;
-    }
-
-    LibultraPerformance played = PerformLibultra(song, banks.file, bank, settings, options);
-    for (const int32_t instrument : played.instruments)
-    {
-        char name[32];
-        std::snprintf(name, sizeof(name), "i%d", instrument);
-
-        Instrument preset;
-        preset.name = name;
-        std::vector<int32_t> waves;
-        preset.zones = LibultraZones(banks.file, instrument, settings, waves);
-        for (std::size_t i = 0; i < preset.zones.size(); i++)
-        {
-            preset.zones[i].wave = WaveAt(banks, waves[i]);
-        }
-
-        played.performance.presets.push_back(std::move(preset));
-    }
-
-    const std::string name = SequenceName(song_index, profile_.names, beside);
-    return BuildFiles(std::move(played.performance), name, options.program);
 }
 
 } // namespace ultralib::sequence_export::n64

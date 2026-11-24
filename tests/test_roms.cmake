@@ -22,10 +22,10 @@ endif()
 # - COP1FullMode and FPUCompare draw values but no PASS or FAIL. Their screenshots in the tests' repository are the
 #   reference. A screenshot shows the frame's 240 lines doubled, and the hashes below are of every other line of it.
 # - The two TIMINGNTSC tests count the instructions that run in one frame. The count depends on the time that each
-#   instruction and bus access takes, which the core doesn't model.
+#   instruction and bus access takes. The core doesn't model those times.
 # - Six of the RESERVED tests also check a second reserved vector instruction. Their expected accumulator values for
-#   it disagree with n64-systemtest's tests of the same instructions, which were checked on hardware. The core follows
-#   n64-systemtest.
+#   it disagree with n64-systemtest's tests of the same instructions. Those tests were checked on hardware. The core
+#   follows n64-systemtest.
 set(ultralib_peterlemon_skipped
     CPUTest/CP1/COP1FullMode CPUTest/CP1/C/FPUCompare CPUTest/CPU/TIMINGNTSC CPUTest/CP1/TIMINGNTSC
     RSPTest/CP2/RESERVED/V073 RSPTest/CP2/RESERVED/VACC RSPTest/CP2/RESERVED/VEXTN RSPTest/CP2/RESERVED/VEXTQ

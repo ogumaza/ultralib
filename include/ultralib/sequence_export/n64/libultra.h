@@ -19,16 +19,19 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
-#include <string>
 #include <vector>
 
 #include "ntdlib/sequence_export/frame.h"
+
+#include "ultralib/n64/al_synth.h"
 #include "ultralib/n64/bank_file.h"
 #include "ultralib/n64/midi.h"
 #include "ultralib/n64/seq_file.h"
 #include "ultralib/sequence_export/n64/games.h"
 #include "ultralib/sequence_export/n64/instruments.h"
+#include "ultralib/sequence_export/n64/wave.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -47,7 +50,7 @@ struct LibultraSettings
     bool line_ramps = false; // the library's ramps are straight lines in amplitude
     int volume = 0x7FFF;     // the sequence player's volume
     bool oscillators = false;
-    BusEffect effect = BusEffect::kNone;
+    std::optional<ultralib::n64::AlEffect> effect = ultralib::n64::AlEffect::kNone;
     double rate = 1.0; // divides the time between the song's events
 };
 
@@ -57,11 +60,6 @@ struct LibultraPerformance
     Performance performance;
     std::vector<int32_t> instruments;
 };
-
-// Decodes a wave's `bytes`, with `book` for VADPCM or as 16-bit samples without one. `rate` plays it at its zone's
-// tuning. A `loop` may be null.
-std::shared_ptr<const Wave> DecodeWave(std::span<const uint8_t> bytes, const ultralib::n64::VadpcmBook* book,
-                                       const ultralib::n64::BankLoop* loop, std::string name, uint32_t rate);
 
 // Plays `song` on bank `bank` of `file`.
 LibultraPerformance PerformLibultra(const LibultraSong& song, const ultralib::n64::BankFile& file,
@@ -77,12 +75,16 @@ std::vector<Zone> LibultraZones(const ultralib::n64::BankFile& file, int32_t ind
 class LibultraGame
 {
 public:
-    // Reads the game's sequences and banks from `image`, which stays valid while the game lives. Without a profile,
-    // the files are found by their headers. Returns nullptr for an image without them.
+    // Reads the game's sequences and banks from `image`. The image stays valid while the game lives. Without a
+    // profile, the files are found by their headers. Returns nullptr for an image without them.
     static std::unique_ptr<LibultraGame> Open(std::span<const uint8_t> image, const LibultraProfile* profile);
 
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
     Conversion Convert(std::size_t index, const PerformOptions& options);
+
+    // The count of the game's songs, and the bytes that the sequence player reads for song `number`.
+    std::size_t SongCount() const;
+    std::span<const uint8_t> SongFile(std::size_t number) const;
 
 private:
     // A bank file, the place in the image of its samples, and its waves, each decoded once.

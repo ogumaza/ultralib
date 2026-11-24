@@ -2,9 +2,12 @@
 
 #include "ultralib/sequence_export/n64/games.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 #include "xsflib/text.h"
 
@@ -13,7 +16,9 @@ namespace ultralib::sequence_export::n64
 namespace
 {
 
-// The table of the game's code that gives each song a volume, as a run of the game's code holds it at 0x80024358. The
+using ultralib::n64::AlEffect;
+
+// The table of the game's code that gives each song a volume. A run of the game's code holds it at 0x80024358. The
 // image keeps it compressed.
 constexpr std::array<uint16_t, 64> kGoldenEyeVolumes = {
     0x6665, 0x7332, 0x7332, 0x7998, 0x7332, 0x5998, 0x6665, 0x6665, 0x6665, 0x6665, 0x7332, 0x6665, 0x7332,
@@ -33,26 +38,19 @@ constexpr std::array<std::size_t, 1> kFirstSequenceIsEffects = {0};
 // The function at 0x80320F68 sets the table's volume for the first player's sequence. It returns at 0x80320F94 for
 // sequence 0x1A before it reads the table. The credits therefore keep the 85 that their script sets.
 constexpr std::array kSuperMario64Tracks = {
-    EadTrack{.sequence = 0x02, .name = "title screen"},
-    EadTrack{.sequence = 0x02, .name = "title screen, with the variation", .variation = -128},
-    EadTrack{.sequence = 0x05, .name = "water levels, all channels"},
-    EadTrack{.sequence = 0x05, .name = "water levels, without channels 6, 9, 10 and 11", .silent_channels = 0x0E40},
-    EadTrack{
-        .sequence = 0x05, .name = "water levels, without channels 0, 1, 6, 9, 10 and 11", .silent_channels = 0x0E43},
-    EadTrack{.sequence = 0x05, .name = "water levels, with the variation", .variation = -128},
-    EadTrack{.sequence = 0x05,
-             .name = "water levels, with the variation, without channels 6, 9, 10 and 11",
-             .variation = -128,
-             .silent_channels = 0x0E40},
-    EadTrack{.sequence = 0x05,
-             .name = "water levels, with the variation, without channels 0, 1, 6, 9, 10 and 11",
-             .variation = -128,
-             .silent_channels = 0x0E43},
-    EadTrack{.sequence = 0x0A, .name = "Big Boo's Haunt, indoors"},
-    EadTrack{.sequence = 0x0A, .name = "Big Boo's Haunt, outdoors", .silent_channels = 0x0070},
-    EadTrack{.sequence = 0x0C, .name = "underground levels, all channels"},
-    EadTrack{.sequence = 0x0C, .name = "underground levels, without channel 8", .silent_channels = 0x0100},
-    EadTrack{.sequence = 0x0C, .name = "underground levels, without channel 3", .silent_channels = 0x0008},
+    EadTrack{.sequence = 0x02}, // the title screen
+    EadTrack{.sequence = 0x02, .variation = -128},
+    EadTrack{.sequence = 0x05}, // the water levels
+    EadTrack{.sequence = 0x05, .silent_channels = 0x0E40},
+    EadTrack{.sequence = 0x05, .silent_channels = 0x0E43},
+    EadTrack{.sequence = 0x05, .variation = -128},
+    EadTrack{.sequence = 0x05, .variation = -128, .silent_channels = 0x0E40},
+    EadTrack{.sequence = 0x05, .variation = -128, .silent_channels = 0x0E43},
+    EadTrack{.sequence = 0x0A},                            // Big Boo's Haunt, indoors
+    EadTrack{.sequence = 0x0A, .silent_channels = 0x0070}, // Big Boo's Haunt, outdoors
+    EadTrack{.sequence = 0x0C},                            // the underground levels
+    EadTrack{.sequence = 0x0C, .silent_channels = 0x0100},
+    EadTrack{.sequence = 0x0C, .silent_channels = 0x0008},
     EadTrack{.sequence = 0x13, .song_volume = 78},
     EadTrack{.sequence = 0x1A, .song_volume = 85},
 };
@@ -68,8 +66,7 @@ constexpr EadProfile kSuperMario64 = {.engine = ultralib::n64::EadEngine::kEarly
                                       .song_volumes_count = 34,
                                       .effect_sequences = kFirstSequenceIsEffects,
                                       .variation = 0,
-                                      .tracks = kSuperMario64Tracks,
-                                      .names = ultralib::n64::kSuperMario64SongNames};
+                                      .tracks = kSuperMario64Tracks};
 
 // Mario Kart 64 (USA). The game asks for 26800 samples a second, and the video interface's divider gives 26807.
 constexpr EadProfile kMarioKart64 = {.engine = ultralib::n64::EadEngine::kMiddle,
@@ -91,8 +88,10 @@ constexpr EadProfile kWaveRace64 = {.engine = ultralib::n64::EadEngine::kMiddle,
 // Sound effects, the nature sounds that the game's code runs through ports, and a list of effects for cutscenes.
 constexpr std::array<std::size_t, 3> kOcarinaOfTimeEffects = {0x00, 0x01, 0x6D};
 
-// The game's code tells Hyrule Field's script through a port what the player is doing. It sets channel volumes in Lon
-// Lon Ranch's sequence by the player's distance from Malon: her voice on two channels and a melody on another.
+// The game's code tells Hyrule Field's script through port 2 what the player is doing: 0 while the player moves, 1 with
+// enemies near and 2 while the player stands still. It sets channel volumes in Lon Lon Ranch's sequence by the player's
+// distance from Malon: her voice on two channels and a melody on another. Far from her, the two channels of her voice
+// go silent. Close to her, the melody's channel does.
 //
 // The file select starts sequence 0x57 with 1 for port 7. Sequence 0x57 points to sequence 0x28. With the port at 1,
 // the sequence leaves out the harp's introduction. The Great Fairy's Fountain plays it with -1.
@@ -102,7 +101,7 @@ constexpr std::array<std::size_t, 3> kOcarinaOfTimeEffects = {0x00, 0x01, 0x6D};
 // in the lair and 0 elsewhere. It then calls the function at 0x800C5D84 with the level's volume from the table at
 // 0x80101F48. The entrance waits 2 game frames for that call. The second function sets the player's volume scale and
 // writes a low-pass cutoff to IO port 4 of channel 15: 0x10 below a volume of 0x40, and otherwise a byte of
-// ((volume - 0x40) / 4 + 1) * 16, which comes to 0 at 127. Each channel whose IO port 5 holds a value then gets a
+// ((volume - 0x40) / 4 + 1) * 16. That byte is 0 at 127. Each channel whose IO port 5 holds a value then gets a
 // reverb from it. The tracks call the function on the 10th game frame, once the channels play. A game frame lasts 3
 // audio frames.
 constexpr int kGameFrame = 3;
@@ -124,22 +123,22 @@ constexpr EadGameCall GanonsTowerCall(int level)
 }
 
 constexpr std::array kOcarinaOfTimeTracks = {
-    EadTrack{.sequence = 0x02, .name = "Hyrule Field, moving", .ports = EadPorts(2, 0)},
-    EadTrack{.sequence = 0x02, .name = "Hyrule Field, enemies near", .ports = EadPorts(2, 1)},
-    EadTrack{.sequence = 0x02, .name = "Hyrule Field, standing still", .ports = EadPorts(2, 2)},
-    EadTrack{.sequence = 0x2F, .name = "Lon Lon Ranch, Malon away"},
-    EadTrack{.sequence = 0x2F, .name = "Lon Lon Ranch, far from Malon", .silent_channels = 0x0003},
-    EadTrack{.sequence = 0x2F, .name = "Lon Lon Ranch, close to Malon", .silent_channels = 0x2000},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, entrance", .call = GanonsTowerCall(7)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 6", .call = GanonsTowerCall(6)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 5", .call = GanonsTowerCall(5)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 4", .call = GanonsTowerCall(4)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 3", .call = GanonsTowerCall(3)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 2", .call = GanonsTowerCall(2)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, level 1", .call = GanonsTowerCall(1)},
-    EadTrack{.sequence = 0x2E, .name = "Ganon's Tower, Ganondorf's lair", .call = GanonsTowerCall(0)},
+    EadTrack{.sequence = 0x02, .ports = EadPorts(2, 0)},
+    EadTrack{.sequence = 0x02, .ports = EadPorts(2, 1)},
+    EadTrack{.sequence = 0x02, .ports = EadPorts(2, 2)},
+    EadTrack{.sequence = 0x2F},
+    EadTrack{.sequence = 0x2F, .silent_channels = 0x0003},
+    EadTrack{.sequence = 0x2F, .silent_channels = 0x2000},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(7)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(6)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(5)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(4)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(3)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(2)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(1)},
+    EadTrack{.sequence = 0x2E, .call = GanonsTowerCall(0)},
     EadTrack{.sequence = 0x28},
-    EadTrack{.sequence = 0x28, .name = "file select, without the harp's introduction", .ports = EadPorts(7, 1)},
+    EadTrack{.sequence = 0x28, .ports = EadPorts(7, 1)},
 };
 
 // Sound effects, the nature sounds, and a sequence that only waits for the game's code to name another.
@@ -152,77 +151,77 @@ constexpr std::array<std::size_t, 3> kMajorasMaskEffects = {0x00, 0x01, 0x7A};
 // play another arrangement for Goron, Zora and Deku Link (0x5C, 0x5D and 0x5E). Link's value, 0x35, plays as the port's
 // -1 does. The file select starts sequence 0x18 with 1 there. The sequence then leaves out the harp's introduction.
 constexpr std::array kMajorasMaskTracks = {
-    EadTrack{.sequence = 0x02, .name = "Termina Field"},
-    EadTrack{.sequence = 0x02, .name = "Termina Field, at dawn", .ports = EadPorts(0, 1)},
-    EadTrack{.sequence = 0x1D, .name = "Clock Town, dawn of the first day", .ports = EadPorts(0, 1, 4, 0)},
-    EadTrack{.sequence = 0x1D, .name = "Clock Town, dawn of the second day", .ports = EadPorts(0, 1, 4, 1)},
-    EadTrack{.sequence = 0x1D, .name = "Clock Town, dawn of the final day", .ports = EadPorts(0, 1, 4, 2)},
-    EadTrack{.sequence = 0x2F, .name = "Romani Ranch, Romani away"},
-    EadTrack{.sequence = 0x2F, .name = "Romani Ranch, far from Romani", .silent_channels = 0x0003},
-    EadTrack{.sequence = 0x2F, .name = "Romani Ranch, close to Romani", .silent_channels = 0x2000},
-    EadTrack{.sequence = 0x4D, .name = "New Wave Bossa Nova, first day", .ports = EadPorts(4, 0)},
-    EadTrack{.sequence = 0x4D, .name = "New Wave Bossa Nova, later days", .ports = EadPorts(4, 1)},
-    EadTrack{.sequence = 0x54, .name = "Ballad of the Wind Fish, first day", .ports = EadPorts(4, 0)},
-    EadTrack{.sequence = 0x54, .name = "Ballad of the Wind Fish, second day", .ports = EadPorts(4, 1)},
-    EadTrack{.sequence = 0x54, .name = "Ballad of the Wind Fish, final day", .ports = EadPorts(4, 2)},
+    EadTrack{.sequence = 0x02},
+    EadTrack{.sequence = 0x02, .ports = EadPorts(0, 1)},
+    EadTrack{.sequence = 0x1D, .ports = EadPorts(0, 1, 4, 0)},
+    EadTrack{.sequence = 0x1D, .ports = EadPorts(0, 1, 4, 1)},
+    EadTrack{.sequence = 0x1D, .ports = EadPorts(0, 1, 4, 2)},
+    EadTrack{.sequence = 0x2F},
+    EadTrack{.sequence = 0x2F, .silent_channels = 0x0003},
+    EadTrack{.sequence = 0x2F, .silent_channels = 0x2000},
+    EadTrack{.sequence = 0x4D, .ports = EadPorts(4, 0)},
+    EadTrack{.sequence = 0x4D, .ports = EadPorts(4, 1)},
+    EadTrack{.sequence = 0x54, .ports = EadPorts(4, 0)},
+    EadTrack{.sequence = 0x54, .ports = EadPorts(4, 1)},
+    EadTrack{.sequence = 0x54, .ports = EadPorts(4, 2)},
     EadTrack{.sequence = 0x18},
-    EadTrack{.sequence = 0x18, .name = "file select, without the harp's introduction", .ports = EadPorts(7, 1)},
+    EadTrack{.sequence = 0x18, .ports = EadPorts(7, 1)},
     EadTrack{.sequence = 0x32},
-    EadTrack{.sequence = 0x32, .name = "Epona's Song, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x32, .name = "Epona's Song, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x32, .name = "Epona's Song, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x32, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x32, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x32, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x33},
-    EadTrack{.sequence = 0x33, .name = "Sun's Song, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x33, .name = "Sun's Song, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x33, .name = "Sun's Song, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x33, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x33, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x33, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x34},
-    EadTrack{.sequence = 0x34, .name = "Song of Time, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x34, .name = "Song of Time, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x34, .name = "Song of Time, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x34, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x34, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x34, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x35},
-    EadTrack{.sequence = 0x35, .name = "Song of Storms, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x35, .name = "Song of Storms, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x35, .name = "Song of Storms, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x35, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x35, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x35, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x47},
-    EadTrack{.sequence = 0x47, .name = "Song of Soaring, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x47, .name = "Song of Soaring, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x47, .name = "Song of Soaring, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x47, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x47, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x47, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x48},
-    EadTrack{.sequence = 0x48, .name = "Song of Healing, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x48, .name = "Song of Healing, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x48, .name = "Song of Healing, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x48, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x48, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x48, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x49},
-    EadTrack{.sequence = 0x49, .name = "Inverted Song of Time, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x49, .name = "Inverted Song of Time, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x49, .name = "Inverted Song of Time, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x49, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x49, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x49, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x4A},
-    EadTrack{.sequence = 0x4A, .name = "Song of Double Time, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x4A, .name = "Song of Double Time, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x4A, .name = "Song of Double Time, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x4A, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x4A, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x4A, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x51},
-    EadTrack{.sequence = 0x51, .name = "Goron Lullaby, introduction, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x51, .name = "Goron Lullaby, introduction, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x51, .name = "Goron Lullaby, introduction, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x51, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x51, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x51, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x5B},
-    EadTrack{.sequence = 0x5B, .name = "Sonata of Awakening, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x5B, .name = "Sonata of Awakening, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x5B, .name = "Sonata of Awakening, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x5B, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x5B, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x5B, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x5C},
-    EadTrack{.sequence = 0x5C, .name = "Goron Lullaby, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x5C, .name = "Goron Lullaby, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x5C, .name = "Goron Lullaby, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x5C, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x5C, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x5C, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x5D},
-    EadTrack{.sequence = 0x5D, .name = "New Wave Bossa Nova, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x5D, .name = "New Wave Bossa Nova, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x5D, .name = "New Wave Bossa Nova, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x5D, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x5D, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x5D, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x5E},
-    EadTrack{.sequence = 0x5E, .name = "Elegy of Emptiness, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x5E, .name = "Elegy of Emptiness, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x5E, .name = "Elegy of Emptiness, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x5E, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x5E, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x5E, .ports = EadPorts(7, 0x5E)},
     EadTrack{.sequence = 0x5F},
-    EadTrack{.sequence = 0x5F, .name = "Oath to Order, ocarina, as Goron Link", .ports = EadPorts(7, 0x5C)},
-    EadTrack{.sequence = 0x5F, .name = "Oath to Order, ocarina, as Zora Link", .ports = EadPorts(7, 0x5D)},
-    EadTrack{.sequence = 0x5F, .name = "Oath to Order, ocarina, as Deku Link", .ports = EadPorts(7, 0x5E)},
+    EadTrack{.sequence = 0x5F, .ports = EadPorts(7, 0x5C)},
+    EadTrack{.sequence = 0x5F, .ports = EadPorts(7, 0x5D)},
+    EadTrack{.sequence = 0x5F, .ports = EadPorts(7, 0x5E)},
 };
 
 constexpr EadProfile kOcarinaOfTime = {.engine = ultralib::n64::EadEngine::kLater,
@@ -231,8 +230,7 @@ constexpr EadProfile kOcarinaOfTime = {.engine = ultralib::n64::EadEngine::kLate
                                        .updates_per_frame = 3,
                                        .levels = EadLevels::kVolumesSquared,
                                        .effect_sequences = kOcarinaOfTimeEffects,
-                                       .tracks = kOcarinaOfTimeTracks,
-                                       .names = ultralib::n64::kOcarinaOfTimeSongNames};
+                                       .tracks = kOcarinaOfTimeTracks};
 
 constexpr EadProfile kMajorasMask = {.engine = ultralib::n64::EadEngine::kLaterMajora,
                                      .output_rate = 32006.0,
@@ -240,8 +238,7 @@ constexpr EadProfile kMajorasMask = {.engine = ultralib::n64::EadEngine::kLaterM
                                      .updates_per_frame = 3,
                                      .levels = EadLevels::kVolumesSquared,
                                      .effect_sequences = kMajorasMaskEffects,
-                                     .tracks = kMajorasMaskTracks,
-                                     .names = ultralib::n64::kMajorasMaskSongNames};
+                                     .tracks = kMajorasMaskTracks};
 
 constexpr std::array<std::size_t, 40> kStadium2Effects = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
@@ -253,16 +250,16 @@ constexpr std::array<std::size_t, 40> kStadium2Effects = {
 // between the two versions of a masked sequence during play.
 constexpr std::array kStadium2Tracks = {
     EadTrack{.sequence = 0x2E, .silent_channels = 0x3000},
-    EadTrack{.sequence = 0x2E, .name = "second version", .silent_channels = 0x07FF},
+    EadTrack{.sequence = 0x2E, .silent_channels = 0x07FF},
     EadTrack{.sequence = 0x49},
-    EadTrack{.sequence = 0x49, .name = "faster", .tempo_change = 17},
+    EadTrack{.sequence = 0x49, .tempo_change = 17},
     EadTrack{.sequence = 0x5D},
-    EadTrack{.sequence = 0x5D, .name = "faster", .tempo_change = 40},
+    EadTrack{.sequence = 0x5D, .tempo_change = 40},
     EadTrack{.sequence = 0x65, .silent_channels = 0xFD00},
-    EadTrack{.sequence = 0x65, .name = "second version", .silent_channels = 0x021F},
+    EadTrack{.sequence = 0x65, .silent_channels = 0x021F},
     EadTrack{.sequence = 0x6D, .tempo_change = 4},
     EadTrack{.sequence = 0x73},
-    EadTrack{.sequence = 0x73, .name = "faster", .tempo_change = 20},
+    EadTrack{.sequence = 0x73, .tempo_change = 20},
 };
 
 // The game's table at 0x878C0 gives each sequence's banks. Its code gives each sequence from 0x28 on a level out of
@@ -299,8 +296,8 @@ constexpr LibmusProfile kPuzzleLeague = {
     .banks = kPuzzleLeagueBanks,
 };
 
-// The volumes that the game's code gives its songs, in a switch at 0x8004B658. Song 0x1D reads a word at 0x80078FB4,
-// which holds 112.
+// The volumes that the game's code gives its songs, in a switch at 0x8004B658. Song 0x1D reads a word at 0x80078FB4.
+// The word holds 112.
 constexpr std::array<uint8_t, 76> kStadiumVolumes = {
     152, 104, 52, 68,  56,  52, 56,  120, 160, 80,  96,  56,  56,  72,  100, 96,  104, 96,  46,
     104, 88,  96, 96,  96,  96, 88,  96,  88,  96,  112, 101, 112, 112, 80,  72,  80,  72,  80,
@@ -329,7 +326,7 @@ constexpr std::array kMarioTennisBanks = {
 // code shows the calls at 0x802ECBCC, four frames after each song starts: TRO-MARIO for character 2, TRO-WALUI for
 // character 8 and TRO-BABYM for character 0x11. Character 6 plays TRO-BABYM without a change.
 constexpr std::array kMarioTennisTempos = {
-    LibmusTempoChange{.song = 0x2A, .scale = 0x8E, .beside = "faster"},
+    LibmusTempoChange{.song = 0x2A, .scale = 0x8E, .beside = true},
     LibmusTempoChange{.song = 0x2F, .scale = 0x7C},
     LibmusTempoChange{.song = 0x3A, .scale = 0x78},
 };
@@ -345,18 +342,15 @@ constexpr LibmusProfile kMarioTennis = {
     .tempo_changes = kMarioTennisTempos,
 };
 
-// The game's scripts slow some cues through 0x8011D768, which passes a rate to 0x800231F4. A run of the game's code in
+// The game's scripts slow some cues through 0x8011D768. It passes a rate to 0x800231F4. A run of the game's code in
 // those areas shows where each slide stops: 0.798 past an area's time limit, and 0.79 in the fishing areas. The rate
-// reaches a cue through 0x8001FF84, which leaves out cue 2, Mamma mia!. Each track holds the rate where the slide
-// stops.
+// reaches a cue through 0x8001FF84. That function leaves out cue 2, Mamma mia!. Each track holds the rate where the
+// slide stops.
 constexpr std::array kHeyYouPikachuRates = {
-    LibultraRateChange{.song = 5, .rate = 0.798, .beside = "slower"},
-    LibultraRateChange{.song = 6, .rate = 0.798, .beside = "slower"},
-    LibultraRateChange{.song = 11, .rate = 0.798, .beside = "slower"},
-    LibultraRateChange{.song = 14, .rate = 0.798, .beside = "slower"},
-    LibultraRateChange{.song = 18, .rate = 0.798, .beside = "slower"},
-    LibultraRateChange{.song = 19, .rate = 0.79, .beside = "slower"},
-    LibultraRateChange{.song = 24, .rate = 0.798, .beside = "slower"},
+    LibultraRateChange{.song = 5, .rate = 0.798},  LibultraRateChange{.song = 6, .rate = 0.798},
+    LibultraRateChange{.song = 11, .rate = 0.798}, LibultraRateChange{.song = 14, .rate = 0.798},
+    LibultraRateChange{.song = 18, .rate = 0.798}, LibultraRateChange{.song = 19, .rate = 0.79},
+    LibultraRateChange{.song = 24, .rate = 0.798},
 };
 
 // Lists of a track's number and a level. The game's code at 0x80055EB4 gives them by number.
@@ -369,25 +363,25 @@ constexpr std::size_t kPaperMarioCastleFinal = 0x54230;
 // The game's map scripts change five songs while they play. Toad Town's triggers pick a mix by the player's position,
 // at the addresses below in the image. No trigger holds mix 6. Each script that uses them starts the song's first
 // version: the calls at 0x7F9138, 0x809130, 0x831418 and 0x8520C0. The code at 0x80056044 gives a mix its near level,
-// and the code at 0x80056068 its full level. A building's script gives the mixes with names their full level. The code
-// at 0x954004 swaps Dry Dry Desert's linked tracks at the oasis. The code at 0xB2C47C and at 0x892A2C and 0x89FECC sets
-// track levels for Yoshi's Village and two rooms of the tunnels. Bowser's Castle sets them in scripts at 0xA4C178 to
-// 0xAA9768.
+// and the code at 0x80056068 its full level. The scripts of the buildings named below give their mixes the full
+// level. The code at 0x954004 swaps Dry Dry Desert's linked tracks at the oasis. The code at 0xB2C47C and at 0x892A2C
+// and 0x89FECC sets track levels for Yoshi's Village and two rooms of the tunnels. Bowser's Castle sets them in scripts
+// at 0xA4C178 to 0xAA9768.
 constexpr std::array kPaperMarioChanges = {
-    SbnChange{.song = 0x00, .mix = 1, .name = "Tayce T.'s House"}, // 0x8313E0
-    SbnChange{.song = 0x00, .mix = 2, .name = "Merlon's House"},   // 0x8090E0
-    SbnChange{.song = 0x00, .mix = 3, .name = "the Dojo"},         // 0x7F9118
-    SbnChange{.song = 0x00, .mix = 4, .near = true},               // 0x8313F8
-    SbnChange{.song = 0x00, .mix = 5, .near = true},               // 0x809110
-    SbnChange{.song = 0x00, .mix = 7, .name = "Russ T.'s House"},  // 0x7F9100
-    SbnChange{.song = 0x00, .mix = 8, .near = true},               // 0x8090F8
-    SbnChange{.song = 0x00, .mix = 9, .name = "the Warehouse"},    // 0x8520A0
-    SbnChange{.song = 0x17, .linked = true, .name = "the Oasis"},
-    SbnChange{.song = 0x26, .levels = kPaperMarioVillageLevels, .name = "full levels"},
-    SbnChange{.song = 0x4B, .levels = kPaperMarioTunnelLevels, .name = "cold rooms"},
-    SbnChange{.song = 0x64, .levels = kPaperMarioCastleFirst, .name = "first areas"},
-    SbnChange{.song = 0x64, .levels = kPaperMarioCastleMiddle, .name = "middle areas"},
-    SbnChange{.song = 0x64, .levels = kPaperMarioCastleFinal, .name = "final areas"},
+    SbnChange{.song = 0x00, .mix = 1},               // 0x8313E0, Tayce T.'s house
+    SbnChange{.song = 0x00, .mix = 2},               // 0x8090E0, Merlon's house
+    SbnChange{.song = 0x00, .mix = 3},               // 0x7F9118, the Dojo
+    SbnChange{.song = 0x00, .mix = 4, .near = true}, // 0x8313F8
+    SbnChange{.song = 0x00, .mix = 5, .near = true}, // 0x809110
+    SbnChange{.song = 0x00, .mix = 7},               // 0x7F9100, Russ T.'s house
+    SbnChange{.song = 0x00, .mix = 8, .near = true}, // 0x8090F8
+    SbnChange{.song = 0x00, .mix = 9},               // 0x8520A0, the warehouse
+    SbnChange{.song = 0x17, .linked = true},
+    SbnChange{.song = 0x26, .levels = kPaperMarioVillageLevels},
+    SbnChange{.song = 0x4B, .levels = kPaperMarioTunnelLevels},
+    SbnChange{.song = 0x64, .levels = kPaperMarioCastleFirst},
+    SbnChange{.song = 0x64, .levels = kPaperMarioCastleMiddle},
+    SbnChange{.song = 0x64, .levels = kPaperMarioCastleFinal},
 };
 
 // Paper Mario's tables, in its image.
@@ -396,9 +390,8 @@ constexpr SbnProfile kPaperMario = {.output_rate = 32006,
                                     .envelope_times = 0x539A0,
                                     .envelope_time_count = 95,
                                     .custom_times = 0x53958,
-                                    .custom_time_count = 40,
                                     .default_envelope = 0x5394C,
-                                    .names = ultralib::n64::kPaperMarioSongNames,
+                                    .tune_scaling = 0x53B30,
                                     .changes = kPaperMarioChanges};
 
 // Hi Pai Paradise (Aleck64). The game's code runs from 0x80025C00, from 0x1000 in the image. The function at
@@ -434,54 +427,54 @@ constexpr LibmusProfile kTowerAndShaft = {
 };
 
 // A song of Gex 64 that the image holds as a raw DEFLATE stream.
-constexpr LibmusSong PackedSong(std::size_t start, std::size_t end, int volume, int reverb_base, const char* name)
+constexpr LibmusSong PackedSong(std::size_t start, std::size_t end, int volume, int reverb_base)
 {
-    return {.start = start, .end = end, .deflated = true, .volume = volume, .reverb_base = reverb_base, .name = name};
+    return {.start = start, .end = end, .deflated = true, .volume = volume, .reverb_base = reverb_base};
 }
 
 // Gex 64: Enter the Gecko (USA). The game's code runs from 0x80000400, from 0x1000 in the image. The songs have the
 // library's early form, and the later player plays them. A channel keeps one voice (0x80054988), an envelope's times
 // count units of its speed (0x80053048), and a voice's volume stops at 0x7FFF before the master volume (0x80054BD4).
 // The songs of looney30 and looney69 reach that top. The profile therefore clips the envelopes. The table of levels at
-// 0x8006F5A8 gives each level a bank, a volume, a reverb base and one song or a list of songs. A song's name lists its
-// levels by their names in the table at 0x8006FCE0. That table has 32 bytes for each level, with the name at byte 20.
-// The level mooshu1 has the songs of circuit5 and no triggers (0x8006F3C0). It never plays the second song. Each song
-// is a raw DEFLATE stream. The function at 0x800327C0 unpacks a level's songs and starts the first at the level's
-// volume (0x80054164) and reverb base (0x80054330). The level's triggers start the others in a list. A trigger fades
-// its song in by the trigger's step (0x800329DC). The fade stops once the volume reaches the volume of the list's first
-// song, and it never goes past the level's volume. Each song below takes the volume where the fade of its track's
-// trigger ends, as runs of the game's code show. Song 2 of looney30 and looney69 ends at 0x70 in looney30 and at 0xA0
-// in looney69. The function at 0x8003335C starts a short song of EXTRAS.WBK from the table at 0x8006FA0C, at the
+// 0x8006F5A8 gives each level a bank, a volume, a reverb base and one song or a list of songs. The comment of each song
+// lists its levels by their names in the table at 0x8006FCE0. That table has 32 bytes for each level, with the name at
+// byte 20. The level mooshu1 has the songs of circuit5 and no triggers (0x8006F3C0). It never plays the second song.
+// Each song is a raw DEFLATE stream. The function at 0x800327C0 unpacks a level's songs and starts the first at the
+// level's volume (0x80054164) and reverb base (0x80054330). The level's triggers start the others in a list. A trigger
+// fades its song in by the trigger's step (0x800329DC). The fade stops once the volume reaches the volume of the list's
+// first song, and it never goes past the level's volume. Runs of the game's code show that each song below takes the
+// volume where the fade of its track's trigger ends. Song 2 of looney30 and looney69 ends at 0x70 in looney30 and at
+// 0xA0 in looney69. The function at 0x8003335C starts a short song of EXTRAS.WBK from the table at 0x8006FA0C, at the
 // table's volume, with a reverb base of 0. Slot 2 of looney69 (0x459FF0) and the song at 0x47B670 are never played. The
 // songs take a master volume of 0x3FFF, from the game's settings. The game asks the library for 22050 Hz.
 constexpr std::array kGexSongs = {
-    PackedSong(0x4918E0, 0x4931C0, 0x60, 0x19, "scifi10 and scifi14"),
-    PackedSong(0x4931C0, 0x4958F0, 0x60, 0x19, "spy2 and map5"),
-    PackedSong(0x3EB590, 0x3EC2A0, 0x40, 0x19, "aztec16"),
-    PackedSong(0x403DD0, 0x405C60, 0x60, 0x19, "gillig1"),
-    PackedSong(0x4030B0, 0x403DD0, 0x60, 0x19, "gexzil9"),
-    PackedSong(0x45CBC0, 0x45D100, 0xA0, 0x19, "looney30 and looney69, song 1"),
-    PackedSong(0x458B70, 0x459FF0, 0x70, 0x19, "looney30 and looney69, song 2"),
-    PackedSong(0x45B420, 0x45CBC0, 0xA0, 0x19, "looney30 and looney69, song 3"),
-    PackedSong(0x45AE70, 0x45B420, 0xA0, 0x19, "looney30, song 4"),
-    PackedSong(0x45A5C0, 0x45AE70, 0xA0, 0x19, "looney30 and looney69, song 5"),
-    PackedSong(0x45D100, 0x45D6D0, 0xA0, 0x19, "looney69, song 6"),
-    PackedSong(0x45D6D0, 0x45DC50, 0xA0, 0x19, "looney69, song 7"),
-    PackedSong(0x459FF0, 0x45A5C0, 0xA0, 0x19, "looney69, song 8, never played"),
-    PackedSong(0x401F70, 0x402880, 0x80, 0x19, "circuit5, circuit9, circuit0 and mooshu1"),
-    PackedSong(0x402880, 0x4030B0, 0x80, 0x19, "circuit5, circuit9 and circuit0, second song"),
-    PackedSong(0x41B390, 0x41CA80, 0x60, 0x19, "horror4, horror2, horror6 and rta1"),
-    PackedSong(0x41CA80, 0x41CE00, 0x60, 0x19, "rta1, second song"),
-    PackedSong(0x439330, 0x43B180, 0x60, 0x19, "kungfu02, kungfu1 and kungfu4"),
-    PackedSong(0x457A80, 0x458B70, 0x60, 0x19, "nypd01"),
-    PackedSong(0x47A340, 0x47B670, 0x60, 0x14, "prehst1 and prehst2"),
-    PackedSong(0x47B670, 0x47CCB0, 0x60, 0x14, "prehismx.wbk, second song, never played"),
-    PackedSong(0x490EC0, 0x4918E0, 0x60, 0x19, "rezop3 and rezop2"),
-    PackedSong(0x405C60, 0x4066F0, 0x60, 0x19, "final01"),
-    LibmusSong{.start = 0x497E00, .end = 0x498300, .volume = 0x78, .name = "EXTRAS.WBK, short song 1"},
-    LibmusSong{.start = 0x498300, .end = 0x498A50, .volume = 0x50, .name = "EXTRAS.WBK, short song 2"},
-    LibmusSong{.start = 0x498A50, .end = 0x499550, .volume = 0x50, .name = "EXTRAS.WBK, short song 3"},
-    LibmusSong{.start = 0x499550, .end = 0x49A200, .volume = 0x64, .name = "EXTRAS.WBK, short song 4"},
+    PackedSong(0x4918E0, 0x4931C0, 0x60, 0x19),                     // scifi10 and scifi14
+    PackedSong(0x4931C0, 0x4958F0, 0x60, 0x19),                     // spy2 and map5
+    PackedSong(0x3EB590, 0x3EC2A0, 0x40, 0x19),                     // aztec16
+    PackedSong(0x403DD0, 0x405C60, 0x60, 0x19),                     // gillig1
+    PackedSong(0x4030B0, 0x403DD0, 0x60, 0x19),                     // gexzil9
+    PackedSong(0x45CBC0, 0x45D100, 0xA0, 0x19),                     // looney30 and looney69, song 1
+    PackedSong(0x458B70, 0x459FF0, 0x70, 0x19),                     // looney30 and looney69, song 2
+    PackedSong(0x45B420, 0x45CBC0, 0xA0, 0x19),                     // looney30 and looney69, song 3
+    PackedSong(0x45AE70, 0x45B420, 0xA0, 0x19),                     // looney30, song 4
+    PackedSong(0x45A5C0, 0x45AE70, 0xA0, 0x19),                     // looney30 and looney69, song 5
+    PackedSong(0x45D100, 0x45D6D0, 0xA0, 0x19),                     // looney69, song 6
+    PackedSong(0x45D6D0, 0x45DC50, 0xA0, 0x19),                     // looney69, song 7
+    PackedSong(0x459FF0, 0x45A5C0, 0xA0, 0x19),                     // looney69, song 8, never played
+    PackedSong(0x401F70, 0x402880, 0x80, 0x19),                     // circuit5, circuit9, circuit0 and mooshu1
+    PackedSong(0x402880, 0x4030B0, 0x80, 0x19),                     // circuit5, circuit9 and circuit0, second song
+    PackedSong(0x41B390, 0x41CA80, 0x60, 0x19),                     // horror4, horror2, horror6 and rta1
+    PackedSong(0x41CA80, 0x41CE00, 0x60, 0x19),                     // rta1, second song
+    PackedSong(0x439330, 0x43B180, 0x60, 0x19),                     // kungfu02, kungfu1 and kungfu4
+    PackedSong(0x457A80, 0x458B70, 0x60, 0x19),                     // nypd01
+    PackedSong(0x47A340, 0x47B670, 0x60, 0x14),                     // prehst1 and prehst2
+    PackedSong(0x47B670, 0x47CCB0, 0x60, 0x14),                     // prehismx.wbk, second song, never played
+    PackedSong(0x490EC0, 0x4918E0, 0x60, 0x19),                     // rezop3 and rezop2
+    PackedSong(0x405C60, 0x4066F0, 0x60, 0x19),                     // final01
+    LibmusSong{.start = 0x497E00, .end = 0x498300, .volume = 0x78}, // EXTRAS.WBK, short song 1
+    LibmusSong{.start = 0x498300, .end = 0x498A50, .volume = 0x50}, // EXTRAS.WBK, short song 2
+    LibmusSong{.start = 0x498A50, .end = 0x499550, .volume = 0x50}, // EXTRAS.WBK, short song 3
+    LibmusSong{.start = 0x499550, .end = 0x49A200, .volume = 0x64}, // EXTRAS.WBK, short song 4
 };
 
 // The banks of the songs above: orchestr.wbk, CIRCUIT.WBK, horrormx.wbk, KungFu.wbk, NYPD.wbk, prehismx.wbk,
@@ -509,7 +502,7 @@ constexpr LibmusProfile kGex = {
 
 // The stereo songs of Super Real Mahjong VS.
 constexpr std::array kSuperRealMahjongVsSets = {
-    LibultraSongSet{.name = "stereo", .first_song = 0, .song_count = 13, .bank = 0x8E040},
+    LibultraSongSet{.first_song = 0, .song_count = 13, .bank = 0x8E040},
 };
 
 const std::array kProfiles = {
@@ -522,8 +515,7 @@ const std::array kProfiles = {
                              .bank = 0x143210,
                              .volumes = {.offset = 0xD64B2, .stride = 8, .count = 30},
                              .oscillators = true,
-                             .effect = BusEffect::kEcho,
-                             .names = ultralib::n64::kChameleonTwistSongNames}},
+                             .effect = AlEffect::kEcho}},
 
     // Chameleon Twist 2 (USA). A run of the game's code gives its player a volume of 0x3FFF for every song. Its player
     // has no oscillators. Its synthesizer has the SDK's big room on the auxiliary bus. The game's code at 0x800CD70C
@@ -535,8 +527,7 @@ const std::array kProfiles = {
                              .line_ramps = true,
                              .volume = 0x3FFF,
                              .program_bend_range = 1216,
-                             .effect = BusEffect::kBigRoom,
-                             .names = ultralib::n64::kChameleonTwist2SongNames}},
+                             .effect = AlEffect::kBigRoom}},
 
     // Cruis'n World (USA). A run of the game's code gives its player a volume of 0x42D7 for every song. Its player has
     // no oscillators. Its synthesizer has the SDK's small room on the auxiliary bus.
@@ -545,8 +536,7 @@ const std::array kProfiles = {
                              .sequences = 0x82CF10,
                              .bank = 0x835C10,
                              .volume = 0x42D7,
-                             .effect = BusEffect::kSmallRoom,
-                             .names = ultralib::n64::kCruisnWorldSongNames}},
+                             .effect = AlEffect::kSmallRoom}},
 
     // GoldenEye 007 (USA). The game's code gives its player a volume for each song, from a table in its data. Its
     // players have no oscillators. Its synthesizer has a custom effect of six sections on the auxiliary bus. The
@@ -557,8 +547,7 @@ const std::array kProfiles = {
                              .rare_sequences = true,
                              .line_ramps = true,
                              .volume_list = kGoldenEyeVolumes,
-                             .effect = BusEffect::kCustom,
-                             .names = ultralib::n64::kGoldenEyeSongNames}},
+                             .effect = AlEffect::kCustom}},
 
     // Pokémon Snap (USA). The game's code gives each player a volume of 0x7F00 at the start of a scene, and fades it
     // from there. HAL's player has the SDK's oscillators at 0x80020364, and its volume arithmetic at 0x8003144C. Its
@@ -570,8 +559,7 @@ const std::array kProfiles = {
                              .player = LibultraPlayer::kHal,
                              .volume = 0x7F00,
                              .oscillators = true,
-                             .effect = BusEffect::kCustom,
-                             .names = ultralib::n64::kPokemonSnapSongNames}},
+                             .effect = AlEffect::kCustom}},
 
     // Hey You, Pikachu! (USA). The game's code at 0x800059E4 reads its 45 standard MIDI files on a player of its
     // developer. The synthesizer's bus has a custom effect of six sections.
@@ -582,8 +570,7 @@ const std::array kProfiles = {
                              .midi_files = 45,
                              .player = LibultraPlayer::kAmbrella,
                              .line_ramps = true,
-                             .effect = BusEffect::kCustom,
-                             .names = ultralib::n64::kHeyYouPikachuSongNames,
+                             .effect = AlEffect::kCustom,
                              .rate_changes = kHeyYouPikachuRates}},
     // Pokémon Puzzle League.
     GameProfile{.sha1 = "8173866fc8c7652abd44c48efcab85441c6806a1", .libmus = &kPuzzleLeague},
@@ -621,7 +608,7 @@ const std::array kProfiles = {
                              .bank = 0x36D9B8,
                              .hudson_sequences = true,
                              .oscillators = true,
-                             .effect = BusEffect::kSmallRoom}},
+                             .effect = AlEffect::kSmallRoom}},
 
     // Mayjinsen 3 (Aleck64). The game's code at 0x800288C4 gives the compressed sequence player the volume at
     // 0x80108DAC. The volume there is 0x3FFF. Its player has no oscillators. The code at 0x80029124 gives its
@@ -631,7 +618,7 @@ const std::array kProfiles = {
                              .sequences = 0x600660,
                              .bank = 0x444250,
                              .volume = 0x3FFF,
-                             .effect = BusEffect::kSmallRoom}},
+                             .effect = AlEffect::kSmallRoom}},
 
     // Star Soldier: Vanishing Earth (Aleck64). The songs play on libultra's compressed sequence player, under Hudson's
     // sound code. The function at 0x80002B84 reads the record of a song. The code at 0x80002D78 gives the player the
@@ -643,7 +630,7 @@ const std::array kProfiles = {
                              .bank = 0x9B3F8,
                              .hudson_sequences = true,
                              .oscillators = true,
-                             .effect = BusEffect::kCustom}},
+                             .effect = AlEffect::kCustom}},
 
     // Super Real Mahjong VS (Aleck64). The sequence file holds 40 sequences. The first 20 play in stereo on the bank
     // file at 0x8E040. The next 20 hold the same songs for mono, on the bank file at 0x81F90. Sequences 13 to 19 and 33
@@ -672,7 +659,7 @@ const std::array kProfiles = {
                              .sequences = 0x1D7720,
                              .bank = 0x196CC0,
                              .volume = 0x7800,
-                             .effect = BusEffect::kSmallRoom}},
+                             .effect = AlEffect::kSmallRoom}},
 
     // Hi Pai Paradise.
     GameProfile{.sha1 = "68329c94e1b9342ee60713e9e0945ea2663210c7", .libmus = &kHiPaiParadise},
@@ -693,6 +680,54 @@ const std::array kProfiles = {
     GameProfile{.sha1 = "7e357995def4078a54ba8e4486f361d631ff3329", .streamed_music = true},
 };
 
+// `numbers` as a list for a label: "6, 9, 10 and 11". A run of three or more numbers is "0 to 10".
+std::string ChannelList(const std::vector<int>& numbers)
+{
+    std::vector<std::string> items;
+    for (std::size_t i = 0; i < numbers.size();)
+    {
+        std::size_t end = i + 1;
+        while (end < numbers.size() && numbers[end] == numbers[end - 1] + 1)
+        {
+            end++;
+        }
+
+        if (end - i >= 3)
+        {
+            items.push_back(std::to_string(numbers[i]) + " to " + std::to_string(numbers[end - 1]));
+        }
+        else
+        {
+            for (std::size_t j = i; j < end; j++)
+            {
+                items.push_back(std::to_string(numbers[j]));
+            }
+        }
+
+        i = end;
+    }
+
+    std::string list;
+    for (std::size_t i = 0; i < items.size(); i++)
+    {
+        list += (i == 0 ? "" : i + 1 == items.size() ? " and " : ", ") + items[i];
+    }
+
+    return list;
+}
+
+// `parts` joined by commas.
+std::string Joined(const std::vector<std::string>& parts)
+{
+    std::string joined;
+    for (const std::string& part : parts)
+    {
+        joined += (joined.empty() ? "" : ", ") + part;
+    }
+
+    return joined;
+}
+
 } // namespace
 
 std::string SequenceLabel(std::size_t index)
@@ -700,24 +735,110 @@ std::string SequenceLabel(std::size_t index)
     return "Sequence " + xsflib::Hex(static_cast<uint32_t>(index), 2, true);
 }
 
-std::string SequenceName(std::size_t index, std::span<const SongName> names, const char* beside)
+std::string SequenceLabel(std::size_t index, const std::string& settings)
 {
-    std::string inside;
-    for (const SongName& song : names)
+    return settings.empty() ? SequenceLabel(index) : SequenceLabel(index) + " (" + settings + ")";
+}
+
+std::string EadTrackSettings(const EadTrack& track)
+{
+    std::vector<std::string> parts;
+    if (track.variation != 0)
     {
-        if (song.index == index)
+        parts.push_back("variation " + std::to_string(track.variation));
+    }
+
+    if (track.silent_channels != 0)
+    {
+        std::vector<int> channels;
+        for (int channel = 0; channel < 16; channel++)
         {
-            inside = song.name;
-            break;
+            if ((track.silent_channels >> channel) & 1)
+            {
+                channels.push_back(channel);
+            }
+        }
+
+        parts.push_back((channels.size() == 1 ? "without channel " : "without channels ") + ChannelList(channels));
+    }
+
+    if (track.tempo_change != 0)
+    {
+        parts.push_back("tempo " + std::string(track.tempo_change > 0 ? "+" : "") + std::to_string(track.tempo_change));
+    }
+
+    for (std::size_t port = 0; port < track.ports.size(); port++)
+    {
+        if (track.ports[port] != -1)
+        {
+            parts.push_back("port " + std::to_string(port) + " = " + std::to_string(track.ports[port]));
         }
     }
 
-    if (beside != nullptr)
+    if (track.call.volume >= 0)
     {
-        inside += (inside.empty() ? "" : ", ") + std::string(beside);
+        parts.push_back("volume " + std::to_string(track.call.volume));
     }
 
-    return inside.empty() ? SequenceLabel(index) : SequenceLabel(index) + " (" + inside + ")";
+    if (track.song_volume >= 0)
+    {
+        parts.push_back("song volume " + std::to_string(track.song_volume));
+    }
+
+    return Joined(parts);
+}
+
+std::string EadTrackLabel(const EadProfile& profile, const EadTrack& track)
+{
+    const auto same_sequence = [&](const EadTrack& other)
+    {
+        return other.sequence == track.sequence;
+    };
+    if (std::ranges::count_if(profile.tracks, same_sequence) < 2)
+    {
+        return SequenceLabel(track.sequence);
+    }
+
+    return SequenceLabel(track.sequence, EadTrackSettings(track));
+}
+
+std::string LibultraRateSettings(const LibultraRateChange& change)
+{
+    char rate[32];
+    std::snprintf(rate, sizeof(rate), "rate %g", change.rate);
+
+    return rate;
+}
+
+std::string LibmusTempoSettings(const LibmusTempoChange& change)
+{
+    return "tempo " + std::to_string(change.scale) + "/128";
+}
+
+std::string SbnChangeSettings(const SbnChange& change)
+{
+    std::vector<std::string> parts;
+    if (change.mix != 0)
+    {
+        parts.push_back("mix " + std::to_string(change.mix));
+    }
+
+    if (change.near)
+    {
+        parts.emplace_back("near");
+    }
+
+    if (change.linked)
+    {
+        parts.emplace_back("linked");
+    }
+
+    if (change.levels != 0)
+    {
+        parts.push_back("track levels at " + xsflib::Hex(static_cast<uint32_t>(change.levels), 0, true));
+    }
+
+    return Joined(parts);
 }
 
 std::span<const GameProfile> Profiles()

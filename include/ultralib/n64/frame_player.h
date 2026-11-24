@@ -33,7 +33,7 @@
 namespace ultralib::n64
 {
 
-// What a host's player has to know of a model.
+// The format of a model's frames, for a host's player.
 struct FrameFormat
 {
     AudioMicrocode microcode = AudioMicrocode::kStandard;
@@ -73,13 +73,15 @@ protected:
     FrameModel& operator=(const FrameModel&) = default;
 };
 
-// A libultra sequence player on the synthesis driver, in either form of the driver.
-class AlFrames final : public FrameModel
+// A player that builds each frame's commands on the synthesis driver. `Model` is AlPlayer, a libultra sequence player
+// in either form of the driver, or AmbrellaPlayer, the player in Hey You, Pikachu! on the compact form.
+template <typename Model, typename Config>
+class SynthFrames final : public FrameModel
 {
 public:
-    AlFrames(const AlSynthConfig& synth, const AlPlayerConfig& player, AudioMemory& memory);
+    SynthFrames(const AlSynthConfig& synth, const Config& player, AudioMemory& memory);
 
-    AlPlayer& Player();
+    Model& Player();
     AlSynth& Synth();
 
     std::unique_ptr<FrameModel> Clone() const override;
@@ -90,30 +92,16 @@ public:
 
 private:
     AlSynth synth_;
-    AlPlayer player_;
+    Model player_;
     FrameFormat format_;
 };
 
-// The player in Hey You, Pikachu! on the compact form of the synthesis driver.
-class AmbrellaFrames final : public FrameModel
-{
-public:
-    AmbrellaFrames(const AlSynthConfig& synth, const AmbrellaPlayerConfig& player, AudioMemory& memory);
+using AlFrames = SynthFrames<AlPlayer, AlPlayerConfig>;
+using AmbrellaFrames = SynthFrames<AmbrellaPlayer, AmbrellaPlayerConfig>;
 
-    AmbrellaPlayer& Player();
-    AlSynth& Synth();
-
-    std::unique_ptr<FrameModel> Clone() const override;
-    void TakeState(const FrameModel& other) override;
-    void BuildFrame(AudioList& list, AudioMemory& memory, uint32_t output, int samples) override;
-    bool Busy() const override;
-    const FrameFormat& Format() const override;
-
-private:
-    AlSynth synth_;
-    AmbrellaPlayer player_;
-    FrameFormat format_;
-};
+// frame_player.cpp instantiates the template for these models.
+extern template class SynthFrames<AlPlayer, AlPlayerConfig>;
+extern template class SynthFrames<AmbrellaPlayer, AmbrellaPlayerConfig>;
 
 // A player of the N64 Music Tools on the synthesis driver. `Model` is MusPlayer or MusLatePlayer.
 template <typename Model, typename Config>

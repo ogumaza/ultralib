@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,14 +37,9 @@ std::vector<uint8_t> ReadSetImage(const std::filesystem::path& path, std::string
 
     if (!image.others.empty())
     {
-        std::string others;
-        for (std::size_t other : image.others)
-        {
-            others += (others.empty() ? "" : ", ") + std::string(games[other].name);
-        }
-
         warnings.push_back(xsflib::Utf8(path) + " contains the chips of more than one game. Only " +
-                           std::string(games[*image.game].name) + " is converted. Not converted: " + others +
+                           std::string(games[*image.game].name) +
+                           " is converted. Not converted: " + ultralib::machine::OtherGameNames(image, games) +
                            ". Put each game in a folder or an archive of its own.");
     }
 

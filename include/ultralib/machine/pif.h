@@ -3,7 +3,7 @@
 // The PIF: its 64 bytes of RAM, the joybus commands that the CPU leaves there, and the commands of its command byte.
 // The PIF ROM isn't emulated. System::Boot (boot.cpp) leaves the state that the ROM's code would leave.
 //
-// By default nothing is connected, as in the existing USF players. Every joybus command then comes back with the "no
+// As in the existing USF players, nothing is connected by default. Every joybus command then comes back with the "no
 // device" bit (0x80) in its receive-length byte. A standard controller can be connected to each of the four ports, and
 // an EEPROM of 4 or 16 Kbit to the cartridge's channel. The replies follow n64brew's pages on the joybus protocol and
 // the PIF.
@@ -20,7 +20,7 @@
 namespace ultralib::machine
 {
 
-// The buttons of a standard controller, as the first two bytes of its reply to the state command (0x01) hold them.
+// The buttons of a standard controller in the first two bytes of its reply to the state command (0x01).
 namespace button
 {
 
@@ -50,7 +50,7 @@ struct ControllerState
     int8_t stick_y = 0;
 };
 
-// A scripted change of one controller's state, at a time in ticks of the CPU clock or in video fields since reset.
+// A scripted change of one controller's state, at a time in the ticks of System::Now or in video fields since reset.
 struct InputEvent
 {
     enum class Clock
@@ -86,7 +86,7 @@ public:
     std::array<uint8_t, kPifRamSize>& Ram();
     const std::array<uint8_t, kPifRamSize>& Ram() const;
 
-    // Called after a save state has restored the RAM. A state holds no joybus configuration, so the frame in the RAM
+    // Called after a save state has restored the RAM. A state holds no joybus configuration. The frame in the RAM
     // becomes the last configuration. libultra sets the command byte's configure bit only when it rebuilds a frame.
     void OnStateLoaded();
 

@@ -47,7 +47,7 @@ enum class Board
     // 0xC0800000. Every other address from 0x80000000 up reads 0, and writes there are lost.
     kAleck64,
 
-    // The Aleck64's E90 main board, which adds a video chip: its list of tiles at 0xD0000000 and its palette at
+    // The Aleck64's E90 main board. It adds a video chip: its list of tiles at 0xD0000000 and its palette at
     // 0xD0010000. Its registers read 0.
     kAleck64E90,
 };
@@ -80,8 +80,8 @@ struct Options
     Timing timing = Timing::kHardware;
 
     // Graphics tasks (type 1 in the task header) don't run on the RSP. They complete as the legacy players complete
-    // them: SP_STATUS gets halt, broke and signal 2, and the SP and DP interrupts follow. Turn this off to run any code
-    // that the CPU starts on the RSP, as the hardware does.
+    // them: SP_STATUS gets halt, broke and signal 2, and the SP and DP interrupts follow. The hardware runs any code
+    // that the CPU starts on the RSP. Turn this off to do the same.
     bool skip_graphics_tasks = true;
 
     // The CPU raises its timer interrupt when Count reaches Compare.
@@ -210,7 +210,7 @@ public:
     void LoadRomImage(std::vector<uint8_t> rom);
     const std::vector<uint8_t>& Rom() const;
 
-    // A dump of the PIF's boot ROM (1984 bytes), which only the CIC-NUS-6105's IPL3 needs: it reads code that the PIF's
+    // A dump of the PIF's boot ROM (1984 bytes). Only the CIC-NUS-6105's IPL3 requires it: it reads code that the PIF's
     // boot code leaves in IMEM. Without it, IMEM stays zero and such a game may not boot.
     void SetPifRom(std::vector<uint8_t> pif_rom);
 
@@ -240,7 +240,8 @@ public:
     void ClearBreakpoints();
     bool HitBreakpoint() const;
 
-    // Time in ticks of the CPU clock since the last reset.
+    // Time in ticks since the last reset. A tick is a cycle of the CPU clock, or half a Count unit in the legacy
+    // timing.
     uint64_t Now() const;
 
     // The video fields that have ended since the last reset.
@@ -307,8 +308,8 @@ public:
         return rdram_.data();
     }
 
-    // How much of RDRAM the CPU may read and write directly. Zero until the RDRAM chips are set up as plain memory:
-    // until then, the CPU goes through ReadBus32 and WriteBus, which follow the chips' device IDs and currents.
+    // How much of RDRAM the CPU may read and write directly. Zero until the RDRAM chips are set up as plain memory.
+    // Until then, the CPU goes through ReadBus32 and WriteBus. They follow the chips' device IDs and currents.
     uint32_t DirectRdramSize() const
     {
         return direct_rdram_size_;
@@ -364,7 +365,7 @@ public:
     void OnSpStatusWritten(uint32_t old_status);
     uint64_t TicksPerInstruction() const;
 
-    // DP registers, which the RSP reaches through COP0 registers 8 to 15.
+    // The DP registers. The RSP reaches them through COP0 registers 8 to 15.
     uint32_t ReadDp(uint32_t index);
     void WriteDp(uint32_t index, uint32_t value);
 
@@ -489,7 +490,7 @@ private:
         uint32_t panel_select = 0;
     };
 
-    // One RDRAM chip's registers, which IPL3's initialization reads and writes.
+    // The registers of one RDRAM chip. IPL3's initialization reads and writes them.
     struct RdramChip
     {
         bool present = false;
@@ -531,7 +532,7 @@ private:
     void CatchUpRsp();
     bool BootWithSeed(uint8_t ipl3_seed, uint64_t& entry_point);
 
-    // Buses.
+    // Buses (system_bus.cpp).
     uint32_t ReadRcp32(uint32_t paddr);
     void WriteRcp32(uint32_t paddr, uint32_t value);
     uint32_t ReadCart32(uint32_t paddr);
@@ -542,7 +543,7 @@ private:
     // The word that a store of `size` bytes at `paddr` puts on the 32-bit bus of the RCP and the PI.
     static uint32_t BusWord(uint32_t paddr, uint64_t value, int size);
 
-    // Devices (rcp.cpp).
+    // Devices (rcp.cpp, and rcp_pi_si.cpp for the PI and the SI).
     uint32_t ReadMi(uint32_t index);
     void WriteMi(uint32_t index, uint32_t value);
     uint32_t ReadVi(uint32_t index);
@@ -686,7 +687,7 @@ private:
     uint64_t rsp_credit_ = 0; // Two RSP cycles for every three ticks: the remainder, in thirds of a cycle.
     uint64_t rsp_clock_ = 0;  // The tick up to which the RSP has run.
 
-    // The task that the RSP runs, as its header gave it when the RSP started.
+    // The task that the RSP runs. The values come from the task header when the RSP started.
     uint32_t task_type_ = 0;
     uint64_t task_start_ = 0;
     bool graphics_task_pending_ = false; // A skipped graphics task waits to complete.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 // What the small test programs share: a ROM, programs written into memory, a CPU about to run one, the options of a
-// set, and the RSP's vector instructions. test_mips.h has the helpers that use the ripper's MIPS encoder.
+// set, and the RSP's vector instructions.
 
 #pragma once
 

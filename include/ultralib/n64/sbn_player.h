@@ -15,6 +15,7 @@
 #include <span>
 #include <vector>
 
+#include "ultralib/n64/al_delay.h"
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
 #include "ultralib/n64/sbn.h"
@@ -322,34 +323,8 @@ private:
         std::array<Note, kVoices> notes;
     };
 
-    struct LowPass
-    {
-        int16_t cutoff = 0;
-        int16_t gain = 0;
-        std::array<int16_t, 16> coefficients = {};
-        uint32_t coefficients_address = 0;
-        uint32_t state = 0;
-        bool first = true;
-    };
-
-    struct Delay
-    {
-        uint32_t input = 0;
-        uint32_t output = 0;
-        int16_t feed_forward = 0;
-        int16_t feed_back = 0;
-        int16_t gain = 0;
-        float mod_increment = 0.0F;
-        float mod_value = 0.0F;
-        int32_t mod_delta = 0;
-        float mod_gain = 0.0F;
-        bool has_filter = false;
-        LowPass filter;
-        bool has_resampler = false;
-        uint32_t resampler_state = 0;
-        float resampler_delta = 0.0F;
-        bool resampler_first = true;
-    };
+    using LowPass = AlLowPass;
+    using Delay = AlDelay;
 
     struct Effect
     {
@@ -431,7 +406,6 @@ private:
     void SynthSetPanAndMix(int voice, uint8_t pan, uint8_t reverb);
     void SynthSetVolumeDelta(int voice, int16_t volume, int32_t delta);
     void LoadEffect(Bus& bus, Effect& effect, uint8_t type);
-    void InitFilter(LowPass& filter, AudioMemory& memory);
     void BuildChunk(AudioList& list, AudioMemory& memory, uint32_t place);
     void DelayBusChannel(AudioList& list) const;
     void AccumulateBus(AudioList& list, const Bus& bus, bool first_bus) const;
@@ -441,10 +415,8 @@ private:
     void LoadPcmLoop(AudioList& list, Voice& voice, const Wave& wave, int32_t count, int& out);
     void LoadPcm(AudioList& list, Voice& voice, const Wave& wave, int32_t count, int& out);
     void MixVoice(AudioList& list, Voice& voice);
-    void DecodeChunk(AudioList& list, Voice& voice, const Wave& wave, int tsam, int bytes, int16_t out, uint32_t flags);
     void PullEffect(AudioList& list, Effect& effect, int16_t wet);
     void ResampleDelay(AudioList& list, const Effect& effect, Delay& delay, int output_buffer);
-    void LoadDelayLine(AudioList& list, const Effect& effect, int64_t position, int buffer, int count);
 
     SbnPlayerConfig config_;
     const SbnArchive* archive_ = nullptr;

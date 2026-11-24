@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "al_synth_constants.h"
+#include "compact_synthesis.h"
 #include "equal_power.h"
 #include "ultralib/n64/al_synth.h"
 
@@ -18,81 +19,47 @@ namespace ultralib::n64
 namespace
 {
 
+using al_synth_constants::FxRun;
 using al_synth_constants::kAdpcmFrameBytes;
 using al_synth_constants::kAdpcmFrameSamples;
 using al_synth_constants::kAdpcmFrameShift;
 using al_synth_constants::kForever;
 using al_synth_constants::kMaxRatio;
 using al_synth_constants::kUnityPitch;
+using al_synth_constants::SplitFxRun;
+using compact_synthesis::kAddressMask;
+using compact_synthesis::kAuxLeft;
+using compact_synthesis::kAuxRight;
+using compact_synthesis::kDmemMask;
+using compact_synthesis::kMainLeft;
+using compact_synthesis::kMainRight;
+using compact_synthesis::kOpMix;
+using compact_synthesis::kOpMove;
+using compact_synthesis::kOpSave;
+using compact_synthesis::PushAdpcm;
+using compact_synthesis::PushDelayLoad;
+using compact_synthesis::PushEnvMixer;
+using compact_synthesis::PushLowPass;
+using compact_synthesis::PushResample;
+using compact_synthesis::Ramp;
+using compact_synthesis::Rate;
+using compact_synthesis::SideLevel;
 
 // The compact form's constants, from the code at 0x800490E0 and 0x80050DE0 in Pokémon Stadium.
 constexpr int kCompactChunkBytes = kAlCompactChunkSamples * 2;
 constexpr int kCompactDecoderOut = kCompactChunkBytes;
 constexpr int kCompactFxTemp = kCompactChunkBytes * 2;
-constexpr uint32_t kCompactMainLeft = 0x4E0;
-constexpr uint32_t kCompactMainRight = 0x650;
-constexpr uint32_t kCompactAuxLeft = 0x7C0;
-constexpr uint32_t kCompactAuxRight = 0x930;
-constexpr uint32_t kOpLoad = 0x04000000;
-constexpr uint32_t kOpSave = 0x06000000;
-constexpr uint32_t kOpMix = 0x0C000000;
-constexpr uint32_t kOpMove = 0x0A000000;
-constexpr uint32_t kAddressMask = 0xFFFFFF;
-constexpr uint32_t kDmemMask = 0xFFF;
 
-// The compact form's rate: a straight line in 8-sample steps. The game's code is at 0x80047910 in Pokémon Stadium.
-// Most games have the arithmetic in double precision. Mario Tennis has it in single precision, at 0x802F26B8.
-template <typename Real>
-int16_t CompactRate(Real volume, Real target, int32_t count, uint16_t& rate_low, bool holds_without_time)
+// The rate of a ramp from `volume` to `target`, in the precision of the game's build.
+int16_t CompactRate(bool single_precision, int16_t volume, int16_t target, int32_t count, uint16_t& rate_low,
+                    bool holds_without_time)
 {
-    if (count == 0)
+    if (single_precision)
     {
-        if (volume <= target)
-        {
-            rate_low = 0xFFFF;
-
-            return 0x7FFF;
-        }
-
-        rate_low = 0;
-
-        return holds_without_time ? int16_t{0} : int16_t{-0x8000};
+        return Rate(static_cast<float>(volume), static_cast<float>(target), count, rate_low, holds_without_time);
     }
 
-    constexpr auto kStep = static_cast<Real>(8.0);
-    constexpr auto kLowScale = static_cast<Real>(65535.0);
-    const Real inverse = static_cast<Real>(1.0) / static_cast<Real>(count);
-    if (target < static_cast<Real>(1.0))
-    {
-        target = static_cast<Real>(1.0);
-    }
-
-    if (volume <= static_cast<Real>(0.0))
-    {
-        volume = static_cast<Real>(1.0);
-    }
-
-    const Real step = (target - volume) * inverse * kStep;
-    const auto whole = static_cast<int16_t>(static_cast<int32_t>(step));
-    const Real above = step - static_cast<Real>(whole) + static_cast<Real>(1.0);
-    const auto carry = static_cast<int16_t>(static_cast<int32_t>(above));
-    rate_low = static_cast<uint16_t>(static_cast<uint32_t>(kLowScale * (above - static_cast<Real>(carry))));
-
-    return static_cast<int16_t>(whole - 1 + carry);
-}
-
-// Where a compact form's ramp has reached. The game's code is at 0x80047A98 in Pokémon Stadium.
-int16_t CompactRamp(int16_t volume, int32_t samples, int16_t rate_high, uint16_t rate_low)
-{
-    const int32_t steps = samples >> 3;
-    if (steps == 0)
-    {
-        return volume;
-    }
-
-    const auto low = static_cast<int32_t>(static_cast<uint32_t>(rate_low) * static_cast<uint32_t>(steps));
-
-    return static_cast<int16_t>(volume + (low >> 16) + rate_high * steps);
+    return Rate(static_cast<double>(volume), static_cast<double>(target), count, rate_low, holds_without_time);
 }
 
 // A count of samples, rounded to whole chunks of the compact form.
@@ -109,7 +76,7 @@ void AlSynth::BuildCompactCommands(AudioList& list, AudioMemory& memory, uint32_
     uint32_t place = output;
     for (int left = samples; left > 0; left -= kAlCompactChunkSamples)
     {
-        list.ClearBuffer(kCompactMainLeft, kOutputBytes);
+        list.ClearBuffer(kMainLeft, kOutputBytes);
         if (fx_.present)
         {
             PullCompactFx(list, memory, current_samples_);
@@ -120,8 +87,8 @@ void AlSynth::BuildCompactCommands(AudioList& list, AudioMemory& memory, uint32_
         }
 
         list.MarkChunkEnd();
-        list.commands.push_back({kOpMix | 0x7FFF, (kCompactAuxLeft << 16) | kCompactMainLeft});
-        list.commands.push_back({kOpMix | 0x7FFF, (kCompactAuxRight << 16) | kCompactMainRight});
+        list.commands.push_back({kOpMix | 0x7FFF, (kAuxLeft << 16) | kMainLeft});
+        list.commands.push_back({kOpMix | 0x7FFF, (kAuxRight << 16) | kMainRight});
 
         // The game's code doesn't write this command's second word. The microcode doesn't read it.
         list.commands.push_back({static_cast<uint32_t>(kAudioInterleave) << 24, 0});
@@ -141,7 +108,7 @@ void AlSynth::BuildCompactCommands(AudioList& list, AudioMemory& memory, uint32_
 
 void AlSynth::PullCompactAux(AudioList& list, AudioMemory& memory, int32_t offset)
 {
-    list.ClearBuffer(kCompactAuxLeft, kCompactChunkBytes * 2);
+    list.ClearBuffer(kAuxLeft, kCompactChunkBytes * 2);
     for (int physical = 0; physical < static_cast<int>(physical_.size()); physical++)
     {
         list.MarkVoice(physical_[static_cast<std::size_t>(physical)].tag);
@@ -243,9 +210,8 @@ int32_t AlSynth::CompactUpdateSamples(int32_t delta, int32_t last_offset, int32_
 // The target level of each side, from the volume and the pan of a voice.
 void AlSynth::SetCompactTargets(PhysicalVoiceState& voice)
 {
-    voice.target_left = static_cast<int16_t>((voice.volume * kEqualPower[static_cast<std::size_t>(voice.pan)]) >> 15);
-    voice.target_right =
-        static_cast<int16_t>((voice.volume * kEqualPower[static_cast<std::size_t>(127 - voice.pan)]) >> 15);
+    voice.target_left = SideLevel(voice.volume, static_cast<std::size_t>(voice.pan));
+    voice.target_right = SideLevel(voice.volume, static_cast<std::size_t>(127 - voice.pan));
 }
 
 // Starts a voice with its wave, volume, pan, effect mix and pitch.
@@ -292,10 +258,8 @@ void AlSynth::ChangeCompactMixer(PhysicalVoiceState& voice, const Param& update,
     }
     else
     {
-        voice.current_left =
-            CompactRamp(voice.current_left, voice.mixer_delta, voice.rate_high_left, voice.rate_low_left);
-        voice.current_right =
-            CompactRamp(voice.current_right, voice.mixer_delta, voice.rate_high_right, voice.rate_low_right);
+        voice.current_left = Ramp(voice.current_left, voice.mixer_delta, voice.rate_high_left, voice.rate_low_left);
+        voice.current_right = Ramp(voice.current_right, voice.mixer_delta, voice.rate_high_right, voice.rate_low_right);
     }
 
     if (voice.current_left == 0)
@@ -335,45 +299,19 @@ void AlSynth::PullCompactSubFrame(AudioList& list, PhysicalVoiceState& voice, in
     }
 
     PullCompactResampler(list, voice, in);
-    if (voice.mixer_first)
+    const bool refresh = voice.mixer_first;
+    if (refresh)
     {
-        constexpr uint32_t kSetTargetLeft = 0x09000000;
-        constexpr uint32_t kSetCurrentLeft = 0x09060000;
-        constexpr uint32_t kSetTargetRight = 0x09040000;
-        constexpr uint32_t kEnvMixerInit = 0x03010000;
-        const auto pair = [](int16_t high, uint16_t low)
-        {
-            return (static_cast<uint32_t>(static_cast<uint16_t>(high)) << 16) | low;
-        };
-
         voice.mixer_first = false;
-        voice.target_left =
-            static_cast<int16_t>((voice.volume * kEqualPower[static_cast<std::size_t>(voice.pan)]) >> 15);
-        voice.rate_high_left = single_precision_ramps_
-                                   ? CompactRate<float>(voice.current_left, voice.target_left, voice.segment_end,
-                                                        voice.rate_low_left, later_compact_)
-                                   : CompactRate<double>(voice.current_left, voice.target_left, voice.segment_end,
-                                                         voice.rate_low_left, later_compact_);
-        voice.target_right =
-            static_cast<int16_t>((voice.volume * kEqualPower[static_cast<std::size_t>(127 - voice.pan)]) >> 15);
-        voice.rate_high_right = single_precision_ramps_
-                                    ? CompactRate<float>(voice.current_right, voice.target_right, voice.segment_end,
-                                                         voice.rate_low_right, later_compact_)
-                                    : CompactRate<double>(voice.current_right, voice.target_right, voice.segment_end,
-                                                          voice.rate_low_right, later_compact_);
-        list.commands.push_back({kSetTargetLeft | static_cast<uint16_t>(voice.target_left),
-                                 pair(voice.rate_high_left, voice.rate_low_left)});
-        list.commands.push_back({kSetCurrentLeft | static_cast<uint16_t>(voice.current_left),
-                                 pair(voice.dry, static_cast<uint16_t>(voice.wet))});
-        list.commands.push_back({kSetTargetRight | static_cast<uint16_t>(voice.target_right),
-                                 pair(voice.rate_high_right, voice.rate_low_right)});
-        list.commands.push_back({kEnvMixerInit | static_cast<uint16_t>(voice.current_right), voice.mixer_state});
-    }
-    else
-    {
-        list.EnvMixer(0, voice.mixer_state);
+        voice.target_left = SideLevel(voice.volume, static_cast<std::size_t>(voice.pan));
+        voice.rate_high_left = CompactRate(single_precision_ramps_, voice.current_left, voice.target_left,
+                                           voice.segment_end, voice.rate_low_left, later_compact_);
+        voice.target_right = SideLevel(voice.volume, static_cast<std::size_t>(127 - voice.pan));
+        voice.rate_high_right = CompactRate(single_precision_ramps_, voice.current_right, voice.target_right,
+                                            voice.segment_end, voice.rate_low_right, later_compact_);
     }
 
+    PushEnvMixer(list, voice, refresh);
     in = static_cast<int16_t>(in + kCompactChunkBytes);
     voice.mixer_delta += kAlCompactChunkSamples;
 }
@@ -402,36 +340,7 @@ void AlSynth::PullCompactResampler(AudioList& list, PhysicalVoiceState& voice, i
     const auto count = static_cast<int32_t>(exact);
     voice.delta = exact - static_cast<float>(count);
     PullCompactAdpcm(list, voice, out, count);
-
-    const auto increment = static_cast<int32_t>(voice.ratio * kUnityPitch);
-    list.commands.push_back({static_cast<uint32_t>(kAudioResample) << 24 | (voice.resampler_state & kAddressMask),
-                             (voice.resampler_first ? 1U << 30 : 0U) |
-                                 ((static_cast<uint32_t>(increment) & 0xFFFF) << 14) |
-                                 ((static_cast<uint32_t>(out) & kDmemMask) << 2)});
-    voice.resampler_first = false;
-}
-
-void AlSynth::CompactDecodeChunk(AudioList& list, PhysicalVoiceState& voice, int tsam, int bytes, int16_t out,
-                                 uint32_t flags)
-{
-    uint32_t align = 0;
-    if (bytes > 0)
-    {
-        const auto location = static_cast<uint32_t>(voice.memory_in);
-        align = location & 7;
-        const uint32_t total = static_cast<uint32_t>(bytes) + align;
-        list.commands.push_back({kOpLoad | (((total - (total & 7) + 8) & kDmemMask) << 12), location - align});
-    }
-
-    if ((flags & kAudioFlagLoop) != 0)
-    {
-        list.SetLoop(voice.decoder_loop_state);
-    }
-
-    list.commands.push_back({static_cast<uint32_t>(kAudioAdpcm) << 24 | (voice.decoder_state & kAddressMask),
-                             (flags << 28) | ((static_cast<uint32_t>(tsam * 2) & kDmemMask) << 16) |
-                                 ((align & 0xF) << 12) | (static_cast<uint32_t>(out) & kDmemMask)});
-    voice.decoder_first = false;
+    PushResample(list, voice.resampler_state, voice.resampler_first, voice.ratio, static_cast<uint32_t>(out), 0);
 }
 
 void AlSynth::PullCompactAdpcm(AudioList& list, PhysicalVoiceState& voice, int16_t& out, int count)
@@ -453,7 +362,7 @@ void AlSynth::PullCompactAdpcm(AudioList& list, PhysicalVoiceState& voice, int16
 
     if (looped)
     {
-        CompactDecodeChunk(list, voice, tsam, bytes, out, first_flag);
+        PushAdpcm(list, voice, tsam, bytes, out, first_flag);
         out = static_cast<int16_t>(out + (voice.last_sample != 0 ? voice.last_sample << 1 : kAdpcmFrameSamples << 1));
         PullCompactAdpcmLoops(list, voice, out, count, samples, frames);
 
@@ -471,7 +380,7 @@ void AlSynth::PullCompactAdpcm(AudioList& list, PhysicalVoiceState& voice, int16
     if (over - (over & 0xF) < count)
     {
         decoded = true;
-        CompactDecodeChunk(list, voice, samples - over, bytes - over_flow, out, first_flag);
+        PushAdpcm(list, voice, samples - over, bytes - over_flow, out, first_flag);
         out = static_cast<int16_t>(out + (voice.last_sample != 0 ? voice.last_sample << 1 : kAdpcmFrameSamples << 1));
         voice.last_sample = (count + voice.last_sample) & 0xF;
         voice.sample += count;
@@ -520,8 +429,8 @@ void AlSynth::PullCompactAdpcmLoops(AudioList& list, PhysicalVoiceState& voice, 
         const int tsam = std::max(samples + voice.last_sample - kAdpcmFrameSamples, 0);
         frames = (tsam + kAdpcmFrameSamples - 1) >> kAdpcmFrameShift;
         const int bytes = frames * kAdpcmFrameBytes;
-        CompactDecodeChunk(list, voice, tsam, bytes, static_cast<int16_t>(place),
-                           (voice.decoder_first ? 1U : 0U) | kAudioFlagLoop);
+        PushAdpcm(list, voice, tsam, bytes, static_cast<int16_t>(place),
+                  (voice.decoder_first ? 1U : 0U) | kAudioFlagLoop);
         list.commands.push_back(
             {kOpMove | (static_cast<uint32_t>(place + (voice.last_sample << 1)) & kAddressMask),
              (static_cast<uint32_t>(buffer_end) << 16) | (static_cast<uint32_t>(samples << 1) & 0xFFFF)});
@@ -535,13 +444,13 @@ void AlSynth::PullCompactAdpcmLoops(AudioList& list, PhysicalVoiceState& voice, 
 void AlSynth::PullCompactFx(AudioList& list, AudioMemory& memory, int32_t offset)
 {
     PullCompactAux(list, memory, offset);
-    list.commands.push_back({kOpMix | 0xDA83, (kCompactAuxLeft << 16) | kCompactAuxLeft});
-    list.commands.push_back({kOpMix | 0x5A82, (kCompactAuxRight << 16) | kCompactAuxLeft});
+    list.commands.push_back({kOpMix | 0xDA83, (kAuxLeft << 16) | kAuxLeft});
+    list.commands.push_back({kOpMix | 0x5A82, (kAuxRight << 16) | kAuxLeft});
 
     int buffer1 = 0;
     int buffer2 = kCompactChunkBytes;
-    CompactSaveFx(list, fx_.input, kCompactAuxLeft);
-    list.ClearBuffer(kCompactAuxRight, kCompactChunkBytes);
+    CompactSaveFx(list, fx_.input, kAuxLeft);
+    list.ClearBuffer(kAuxRight, kCompactChunkBytes);
 
     const auto mix = [&](int16_t gain, int in, uint32_t out)
     {
@@ -560,7 +469,7 @@ void AlSynth::PullCompactFx(AudioList& list, AudioMemory& memory, int32_t offset
         }
         else
         {
-            CompactLoadFx(list, in_place, buffer1, kAlCompactChunkSamples);
+            PushDelayLoad(list, fx_.base, fx_.length, in_place, buffer1, kAlCompactChunkSamples);
         }
 
         CompactLoadFxOutput(list, delay, buffer2);
@@ -581,7 +490,7 @@ void AlSynth::PullCompactFx(AudioList& list, AudioMemory& memory, int32_t offset
 
         if (delay.has_low_pass)
         {
-            CompactFilter(list, delay.low_pass, buffer2);
+            PushLowPass(list, delay.low_pass, buffer2);
         }
 
         if (!delay.has_resampler)
@@ -591,7 +500,7 @@ void AlSynth::PullCompactFx(AudioList& list, AudioMemory& memory, int32_t offset
 
         if (delay.gain != 0)
         {
-            mix(delay.gain, buffer2, kCompactAuxRight);
+            mix(delay.gain, buffer2, kAuxRight);
         }
 
         // The game's code takes this place with the output added, not taken away.
@@ -604,59 +513,25 @@ void AlSynth::PullCompactFx(AudioList& list, AudioMemory& memory, int32_t offset
         fx_.input -= static_cast<int32_t>(fx_.length);
     }
 
-    list.commands.push_back({kOpMove | kCompactAuxRight, (kCompactAuxLeft << 16) | kCompactChunkBytes});
-}
-
-void AlSynth::CompactLoadFx(AudioList& list, int64_t position, int buffer, int count)
-{
-    if (position < 0)
-    {
-        position += fx_.length;
-    }
-
-    const int64_t updated = position + count;
-    const auto length = static_cast<int64_t>(fx_.length);
-    const auto address = static_cast<uint32_t>(fx_.base + position * 2);
-    if (updated > length)
-    {
-        const auto before = static_cast<uint32_t>(length - position) << 1;
-        const auto after = static_cast<uint32_t>(updated - length) << 1;
-        list.commands.push_back(
-            {kOpLoad | ((before & kDmemMask) << 12) | (static_cast<uint32_t>(buffer) & kDmemMask), address});
-        list.commands.push_back(
-            {kOpLoad | ((after & kDmemMask) << 12) | ((static_cast<uint32_t>(buffer) + before) & kDmemMask), fx_.base});
-    }
-    else
-    {
-        list.commands.push_back({kOpLoad | ((static_cast<uint32_t>(count << 1) & kDmemMask) << 12) |
-                                     (static_cast<uint32_t>(buffer) & kDmemMask),
-                                 address});
-    }
+    list.commands.push_back({kOpMove | kAuxRight, (kAuxLeft << 16) | kCompactChunkBytes});
 }
 
 void AlSynth::CompactSaveFx(AudioList& list, int64_t position, int buffer)
 {
-    if (position < 0)
+    const FxRun run = SplitFxRun(fx_.base, fx_.length, position, kAlCompactChunkSamples);
+    if (run.after > 0)
     {
-        position += fx_.length;
-    }
-
-    const int64_t updated = position + kAlCompactChunkSamples;
-    const auto length = static_cast<int64_t>(fx_.length);
-    const auto address = static_cast<uint32_t>(fx_.base + position * 2);
-    if (updated > length)
-    {
-        const auto before = static_cast<uint32_t>(length - position) << 1;
-        const auto after = static_cast<uint32_t>(updated - length) << 1;
+        const auto before = static_cast<uint32_t>(run.before) << 1;
+        const auto after = static_cast<uint32_t>(run.after) << 1;
         list.commands.push_back(
-            {kOpSave | ((before & kDmemMask) << 12) | (static_cast<uint32_t>(buffer) & kDmemMask), address});
+            {kOpSave | ((before & kDmemMask) << 12) | (static_cast<uint32_t>(buffer) & kDmemMask), run.address});
         list.commands.push_back(
             {kOpSave | ((after & kDmemMask) << 12) | ((static_cast<uint32_t>(buffer) + before) & kDmemMask), fx_.base});
     }
     else
     {
         list.commands.push_back(
-            {kOpSave | (kCompactChunkBytes << 12) | (static_cast<uint32_t>(buffer) & kDmemMask), address});
+            {kOpSave | (kCompactChunkBytes << 12) | (static_cast<uint32_t>(buffer) & kDmemMask), run.address});
     }
 }
 
@@ -664,50 +539,19 @@ void AlSynth::CompactLoadFxOutput(AudioList& list, Delay& delay, int buffer)
 {
     if (!delay.has_resampler)
     {
-        CompactLoadFx(list, fx_.input - static_cast<int32_t>(delay.output), buffer, kAlCompactChunkSamples);
+        PushDelayLoad(list, fx_.base, fx_.length, fx_.input - static_cast<int32_t>(delay.output), buffer,
+                      kAlCompactChunkSamples);
 
         return;
     }
 
-    constexpr double kRange = 2.0;
-    const int32_t length = static_cast<int32_t>(delay.output - delay.input);
-
-    // The chorus's modulation: a triangle from -1 to 1 at the chorus's rate.
-    delay.mod_value += delay.mod_increment * static_cast<float>(kAlCompactChunkSamples);
-    delay.mod_value = delay.mod_value > kRange ? static_cast<float>(delay.mod_value - kRange * 2) : delay.mod_value;
-    float wave = delay.mod_value < 0 ? -delay.mod_value : delay.mod_value;
-    wave = static_cast<float>(wave - kRange / 2);
-    float delta = delay.mod_gain * wave;
-
-    delta /= static_cast<float>(length);
-    delta = static_cast<float>(static_cast<int32_t>(delta * kUnityPitch));
-    delta = delta / kUnityPitch;
-    const float ratio = static_cast<float>(1.0 - delta);
-
-    const float exact = delay.resampler_delta + ratio * static_cast<float>(kAlCompactChunkSamples);
-    const auto samples = static_cast<int32_t>(exact);
-    delay.resampler_delta = exact - static_cast<float>(samples);
-
+    const compact_synthesis::ChorusStep step = compact_synthesis::StepChorus(delay, kAlCompactChunkSamples);
     const int64_t out_place = fx_.input - (static_cast<int64_t>(delay.output) - delay.mod_delta);
     const int align = static_cast<int>((fx_.base + out_place * 2) & 7) >> 1;
-    CompactLoadFx(list, out_place - align, kCompactFxTemp, samples + align);
-    const auto increment = static_cast<int32_t>(ratio * kUnityPitch);
-    list.commands.push_back({static_cast<uint32_t>(kAudioResample) << 24 | (delay.resampler_state & kAddressMask),
-                             (delay.resampler_first ? 1U << 30 : 0U) |
-                                 ((static_cast<uint32_t>(increment) & 0xFFFF) << 14) |
-                                 ((static_cast<uint32_t>((align << 1) + kCompactFxTemp) & kDmemMask) << 2) |
-                                 ((static_cast<uint32_t>(buffer) >> 8) & 3)});
-    delay.resampler_first = false;
-    delay.mod_delta += samples - kAlCompactChunkSamples;
-}
-
-void AlSynth::CompactFilter(AudioList& list, LowPass& low_pass, int buffer)
-{
-    list.LoadAdpcm(32, low_pass.coefficients_address);
-    list.commands.push_back({static_cast<uint32_t>(kAudioPoleFilter) << 24 | (low_pass.first ? 1U << 16 : 0U) |
-                                 static_cast<uint16_t>(low_pass.gain),
-                             ((static_cast<uint32_t>(buffer) >> 8) << 24) | (low_pass.state & kAddressMask)});
-    low_pass.first = false;
+    PushDelayLoad(list, fx_.base, fx_.length, out_place - align, kCompactFxTemp, step.samples + align);
+    PushResample(list, delay.resampler_state, delay.resampler_first, step.ratio,
+                 static_cast<uint32_t>((align << 1) + kCompactFxTemp), (static_cast<uint32_t>(buffer) >> 8) & 3);
+    delay.mod_delta += step.samples - kAlCompactChunkSamples;
 }
 
 } // namespace ultralib::n64

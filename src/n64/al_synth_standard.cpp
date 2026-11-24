@@ -20,12 +20,14 @@ namespace ultralib::n64
 namespace
 {
 
+using al_synth_constants::FxRun;
 using al_synth_constants::kAdpcmFrameBytes;
 using al_synth_constants::kAdpcmFrameSamples;
 using al_synth_constants::kAdpcmFrameShift;
 using al_synth_constants::kForever;
 using al_synth_constants::kMaxRatio;
 using al_synth_constants::kUnityPitch;
+using al_synth_constants::SplitFxRun;
 
 // The rate that takes a level from `volume` to `target` over `count` samples. The microcode updates the level on every
 // 8th sample. The rate is therefore the ratio per 8 samples, in a whole part and a 16-bit fraction.
@@ -784,27 +786,20 @@ void AlSynth::PullFx(AudioList& list, AudioMemory& memory, int count, int32_t of
 
 void AlSynth::LoadFxBuffer(AudioList& list, int64_t position, int buffer, int count)
 {
-    if (position < 0)
+    const FxRun run = SplitFxRun(fx_.base, fx_.length, position, count);
+    if (run.after > 0)
     {
-        position += fx_.length;
-    }
-
-    const int64_t updated = position + count;
-    const auto length = static_cast<int64_t>(fx_.length);
-    const auto address = static_cast<uint32_t>(fx_.base + position * 2);
-    if (updated > length)
-    {
-        const auto after = static_cast<int32_t>(updated - length);
-        const auto before = static_cast<int32_t>(length - position);
+        const auto after = static_cast<int32_t>(run.after);
+        const auto before = static_cast<int32_t>(run.before);
         list.SetBuffer(0, static_cast<uint16_t>(buffer), 0, static_cast<uint32_t>(before) << 1);
-        list.LoadBuffer(address);
+        list.LoadBuffer(run.address);
         list.SetBuffer(0, static_cast<uint16_t>(buffer + (before << 1)), 0, static_cast<uint32_t>(after) << 1);
         list.LoadBuffer(fx_.base);
     }
     else
     {
         list.SetBuffer(0, static_cast<uint16_t>(buffer), 0, static_cast<uint32_t>(count) << 1);
-        list.LoadBuffer(address);
+        list.LoadBuffer(run.address);
     }
 
     list.SetBuffer(0, 0, 0, static_cast<uint32_t>(count) << 1);
@@ -812,20 +807,13 @@ void AlSynth::LoadFxBuffer(AudioList& list, int64_t position, int buffer, int co
 
 void AlSynth::SaveFxBuffer(AudioList& list, int64_t position, int buffer, int count)
 {
-    if (position < 0)
+    const FxRun run = SplitFxRun(fx_.base, fx_.length, position, count);
+    if (run.after > 0)
     {
-        position += fx_.length;
-    }
-
-    const int64_t updated = position + count;
-    const auto length = static_cast<int64_t>(fx_.length);
-    const auto address = static_cast<uint32_t>(fx_.base + position * 2);
-    if (updated > length)
-    {
-        const auto after = static_cast<int32_t>(updated - length);
-        const auto before = static_cast<int32_t>(length - position);
+        const auto after = static_cast<int32_t>(run.after);
+        const auto before = static_cast<int32_t>(run.before);
         list.SetBuffer(0, 0, static_cast<uint16_t>(buffer), static_cast<uint32_t>(before) << 1);
-        list.SaveBuffer(address);
+        list.SaveBuffer(run.address);
         list.SetBuffer(0, 0, static_cast<uint16_t>(buffer + (before << 1)), static_cast<uint32_t>(after) << 1);
         list.SaveBuffer(fx_.base);
         list.SetBuffer(0, 0, 0, static_cast<uint32_t>(count) << 1);
@@ -833,7 +821,7 @@ void AlSynth::SaveFxBuffer(AudioList& list, int64_t position, int buffer, int co
     else
     {
         list.SetBuffer(0, 0, static_cast<uint16_t>(buffer), static_cast<uint32_t>(count) << 1);
-        list.SaveBuffer(address);
+        list.SaveBuffer(run.address);
     }
 }
 

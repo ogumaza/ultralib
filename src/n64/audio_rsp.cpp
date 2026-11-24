@@ -43,6 +43,7 @@ using audio_rsp_common::LinearFirstRamp;
 using audio_rsp_common::LinearLimitLanes;
 using audio_rsp_common::LinearStepLanes;
 using audio_rsp_common::MixSample;
+using audio_rsp_common::MoveDmem16;
 using audio_rsp_common::MultiplyFraction;
 using audio_rsp_common::RecordDma;
 using audio_rsp_common::RoundedUp;
@@ -666,19 +667,9 @@ void AudioRsp::DmemMove(const AudioCommand& command)
         ops_->ops.back().group = 16;
     }
 
-    std::array<uint8_t, 16> bytes;
     while (count > 0)
     {
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            bytes[i] = dmem_[(from + i) & kDmemMask];
-        }
-
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            dmem_[(to + i) & kDmemMask] = bytes[i];
-        }
-
+        MoveDmem16(dmem_, from, to);
         count -= 16;
         from += 16;
         to += 16;
@@ -1063,16 +1054,7 @@ void AudioRsp::SaveResampleState(const ResampleEnd& end, int32_t first_in, uint3
     }
 
     Put16(layout_.scratch + 10, static_cast<uint16_t>(misaligned));
-    std::array<uint8_t, 16> bytes;
-    for (uint32_t i = 0; i < 16; i++)
-    {
-        bytes[i] = dmem_[(static_cast<uint32_t>(place) + i) & kDmemMask];
-    }
-
-    for (uint32_t i = 0; i < 16; i++)
-    {
-        dmem_[(layout_.scratch + 16 + i) & kDmemMask] = bytes[i];
-    }
+    MoveDmem16(dmem_, static_cast<uint32_t>(place), layout_.scratch + 16);
 
     DmaWrite(layout_.scratch, state, 31, bus);
 }

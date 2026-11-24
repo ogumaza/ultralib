@@ -5,20 +5,22 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <exception>
+#include <map>
 #include <optional>
 #include <ranges>
+#include <span>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "seqlib/midi/recorder.h"
-#include "xsflib/bytes.h"
 
-#include "ultralib/n64/rom_data.h"
-#include "ultralib/n64/seq_file.h"
-#include "ultralib/n64/vadpcm.h"
-#include "ultralib/sequence_export/n64/envelope.h"
+#include "ead_shared.h"
+#include "n64/ead_common.h"
+#include "n64/ead_constants.h"
+#include "n64/ead_tables.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -28,27 +30,31 @@ namespace
 
 namespace n64 = ultralib::n64;
 namespace midi = seqlib::midi;
+using ead::Be16At;
+using ead::IsLater;
+using ead::kKeyOffset;
+using ead::kPitchScaleSteps;
+using ead::ReleaseFall;
 using n64::EadEngine;
 using n64::ScriptCommand;
 using n64::ScriptLevel;
 using n64::ScriptOp;
+using n64::ead_common::ProgramInstrument;
+using n64::ead_common::ProgramObject;
+using n64::ead_constants::kTicksPerBeat;
 
 constexpr std::size_t kChannels = 16;
+
 // The most layers that a channel holds in any game's build of the engines.
 constexpr std::size_t kLayers = 6;
 
 // The layers of a channel in the early engine.
 constexpr std::size_t kEarlyLayers = 4;
 constexpr int kStackDepth = 4;
-constexpr int kTicksPerBeat = 48;
 
 // How many commands a script may run in one tick before the performer takes it for a closed loop of commands without a
 // delay. The game would hang there.
 constexpr int kMostCommands = 4096;
-
-// A script's note 39 plays a sample at its tuning. MIDI's key 60 stands for it.
-constexpr int kKeyOffset = 21;
-constexpr int kRootKey = 60;
 
 // The programs of a channel's drums, of the later engine's sound effects and of the first of the engines' built-in
 // waves.
@@ -56,18 +62,8 @@ constexpr int kEffectProgram = 0x7E;
 constexpr int kDrumProgram = 0x7F;
 constexpr int kFirstWaveProgram = 0x80;
 
-// A layer's default for a note's gate, the defaults of a channel, and the tables of short notes.
+// A layer's default for a note's gate.
 constexpr int kDefaultGate = 0x80;
-constexpr int kDefaultReleaseRate = 0x20;
-constexpr int kDefaultVibratoRate = 0x800;
-constexpr std::array<uint8_t, 16> kDefaultVelocities = {12, 25, 38, 51,  57,  64,  71,  76,
-                                                        83, 89, 96, 102, 109, 115, 121, 127};
-constexpr std::array<uint8_t, 16> kDefaultGates = {229, 203, 177, 151, 139, 126, 113, 100,
-                                                   87,  74,  61,  48,  36,  23,  10,  0};
-
-// The engines' default envelope, in the units of a bank's envelopes.
-constexpr std::array<n64::EadEnvelope::Point, 3> kDefaultEnvelope = {
-    {{4, 32000}, {1000, 32000}, {n64::kEnvelopeHang, 0}}};
 
 // A channel's gain on its samples: a number with four bits below the point.
 constexpr int kUnityGain = 16;
@@ -75,21 +71,8 @@ constexpr int kUnityGain = 16;
 // The bit of a layer's flags, in Majora's Mask's build of the engine, that takes the channel's gain.
 constexpr int kLayerUsesChannelGain = 0x40;
 
-// The top of an envelope's scale.
-constexpr double kEnvelopeTop = 32767.0;
-
-// The highest resampling rate, against the output's rate.
-constexpr double kHighestRate = 3.99992;
-
-// An engine's scale of pitch: 127 steps make an octave. A vibrato's curve is a triangle of 64 steps that peaks at 120
-// of them, and the depth counts out of 4096. Its position advances by the rate in each update, and 65536 is a period.
-constexpr double kPitchScaleSteps = 127.0;
-constexpr double kVibratoPeakSteps = 120.0;
-constexpr double kVibratoDepthUnit = 4096.0;
-constexpr double kVibratoPeriodUnits = 65536.0;
-
-// The engine's tempos count bpm * 48. A tick falls due when the count reaches this much for each update of a frame,
-// which the engine takes to last 16.713 ms.
+// The engine's tempos count bpm * 48. A tick falls due when the count reaches this much for each update of a frame.
+// The engine takes a frame to last 16.713 ms.
 constexpr double kTempoCountPerUpdate = 2880000.0 / 48.0 / 16.713;
 constexpr double kEngineFrameSeconds = 0.016713;
 
@@ -101,87 +84,6 @@ constexpr double kFineBendSteps = 127.0 * 6.0;
 
 // A later engine's longest note without a length, in ticks.
 constexpr double kLongestUnmeasuredNote = 32766.0;
-
-// What each row of the later engine's low-pass table does at 32006 Hz: where the table's 8 taps fall 3 dB below their
-// gain at 0 Hz, and that gain. A two-pole filter stands in for the taps. The first row and the last pass everything
-// below half the rate.
-struct LaterLowPass
-{
-    double hz = 0.0;
-    double gain = 1.0;
-};
-
-constexpr std::array<LaterLowPass, 16> kLaterLowPasses = {{{0.0, 1.0},
-                                                           {1850.0, 1.0},
-                                                           {1990.0, 1.0},
-                                                           {2290.0, 1.0},
-                                                           {2980.0, 0.951},
-                                                           {4360.0, 0.854},
-                                                           {5770.0, 0.707},
-                                                           {6860.0, 0.670},
-                                                           {7850.0, 0.640},
-                                                           {8730.0, 0.610},
-                                                           {9580.0, 0.639},
-                                                           {10600.0, 0.624},
-                                                           {11710.0, 0.602},
-                                                           {12530.0, 0.603},
-                                                           {13270.0, 0.670},
-                                                           {0.0, 0.846}}};
-
-// A note's amplitude when the velocity, the volumes and the envelope stand at their tops. Wave Race 64's code at
-// 0x800BA758 multiplies the square of the velocity, without scaling it, by the pan. It writes the top 11 of 16 bits,
-// and the mixer's unit is 32768. Mario Kart 64's code at 0x800BC7B0 multiplies a velocity's share of 1 by 4096, and the
-// mixer's unit is 4096 times 16.
-double FullScale(EadLevels levels)
-{
-    return levels == EadLevels::kEnvelopeSquared ? 127.0 * 127.0 / 32768.0 : 1.0;
-}
-
-bool IsLater(EadEngine engine)
-{
-    return engine == EadEngine::kLater || engine == EadEngine::kLaterMajora;
-}
-
-// How many frames a later engine's release takes from the top of the envelope, for each rate of its table. A rate of 0
-// never falls.
-double LaterReleaseFrames(int rate)
-{
-    constexpr std::array<double, 5> kShortest = {0.75, 0.66, 0.5, 0.33, 0.25};
-    if (rate >= 251)
-    {
-        return kShortest[static_cast<std::size_t>(rate - 251)];
-    }
-
-    if (rate >= 128)
-    {
-        return 251.0 - rate;
-    }
-
-    if (rate >= 16)
-    {
-        return 4.0 * (143 - rate);
-    }
-
-    return rate >= 1 ? 60.0 * (23 - rate) : 0.0;
-}
-
-// How far a note's level falls in an update during its release, from a top of 1.
-double ReleaseFall(EadEngine engine, int rate, int updates_per_frame)
-{
-    if (IsLater(engine))
-    {
-        const double frames = LaterReleaseFrames(rate);
-
-        return frames > 0.0 ? 1.0 / (frames * updates_per_frame) : 0.0;
-    }
-
-    return engine == EadEngine::kEarly ? rate * 24.0 / kEnvelopeTop : rate * (3.0 / 1280.0) / updates_per_frame;
-}
-
-uint32_t Be16At(std::span<const uint8_t> bytes, std::size_t place)
-{
-    return place + 2 <= bytes.size() ? xsflib::LoadBe16(bytes.data() + place) : 0;
-}
 
 // The controller's value for a product of volumes. CC7 and CC11 act squared. A build that squares the volumes itself
 // therefore takes them as they stand.
@@ -274,7 +176,7 @@ struct Channel
     int envelope = -1;
     int release_rate = -1;
     int sustain = 0;
-    int vibrato_rate = kDefaultVibratoRate;
+    int vibrato_rate = n64::ead_constants::kChannelVibratoRate;
     int vibrato_depth = 0;
     int vibrato_delay = 0;
     uint32_t dynamic_table = 0;
@@ -284,25 +186,16 @@ struct Channel
     std::array<Layer, kLayers> layers;
 };
 
-// The program that the engine's lookup finds: past the end, the last one; without an instrument, the one before it.
-// Returns -1 if there's none.
-int FindProgram(const n64::EadBank& bank, int program)
+// The program that the engine's lookup finds, or a negative number if there's none. The later engine's lookup finds a
+// program only if the bank holds it.
+int FindProgram(const n64::EadBank& bank, int program, bool later)
 {
-    int chosen = std::min(program, static_cast<int>(bank.program_instruments.size()) - 1);
-    while (chosen >= 0 && bank.program_instruments[static_cast<std::size_t>(chosen)] == n64::kNoObject)
+    if (later)
     {
-        chosen--;
+        return ProgramObject(bank, program) != n64::kNoObject ? program : -1;
     }
 
-    return chosen;
-}
-
-// The later engine's lookup finds a program only if the bank holds it. Returns -1 otherwise.
-int FindLaterProgram(const n64::EadBank& bank, int program)
-{
-    const std::size_t place = static_cast<std::size_t>(program);
-
-    return place < bank.program_instruments.size() && bank.program_instruments[place] != n64::kNoObject ? program : -1;
+    return n64::ead_common::NearestProgram(bank, program);
 }
 
 // The sample that an instrument plays for a note, and a number that tells its sounds apart.
@@ -314,7 +207,7 @@ struct InstrumentSound
 
 InstrumentSound SoundFor(const n64::EadBank& bank, int program, int note)
 {
-    const int32_t index = bank.program_instruments[static_cast<std::size_t>(program)];
+    const int32_t index = ProgramObject(bank, program);
     const n64::EadInstrument& instrument = bank.instruments[static_cast<std::size_t>(index)];
     if (note < instrument.normal_range_low)
     {
@@ -337,8 +230,8 @@ public:
           options_(options),
           bytes_(settings.sequence.begin(), settings.sequence.end()),
           bank_set_(settings.bank_set),
-          velocities_(kDefaultVelocities.begin(), kDefaultVelocities.end()),
-          gates_(kDefaultGates.begin(), kDefaultGates.end()),
+          velocities_(n64::ead_tables::kShortVelocity.begin(), n64::ead_tables::kShortVelocity.end()),
+          gates_(n64::ead_tables::kShortGate.begin(), n64::ead_tables::kShortGate.end()),
           threshold_(static_cast<int>(settings.clock.updates_per_frame * kTempoCountPerUpdate)),
           later_(IsLater(settings.engine)),
           majora_(settings.engine == EadEngine::kLaterMajora)
@@ -706,7 +599,7 @@ void Performer::ChooseInstrument(Channel& channel, int program)
     }
 
     const n64::EadBank& bank = BankOf(channel.bank);
-    const int chosen = later_ ? FindLaterProgram(bank, program) : FindProgram(bank, program);
+    const int chosen = FindProgram(bank, program, later_);
     channel.has_instrument = chosen >= 0;
     if (chosen >= 0)
     {
@@ -739,7 +632,7 @@ void Performer::ChooseLayerInstrument(const Channel& channel, Layer& layer, int 
     }
 
     const n64::EadBank& bank = BankOf(channel.bank);
-    const int chosen = later_ ? FindLaterProgram(bank, program) : FindProgram(bank, program);
+    const int chosen = FindProgram(bank, program, later_);
     if (chosen >= 0)
     {
         layer.program = chosen;
@@ -914,7 +807,8 @@ void Performer::StartNote(std::size_t channel_index, Layer& layer, uint32_t pres
     layer.alone = layer.legato || layer.portamento.mode != 0 || layer.offset != 0.0;
     layer.pan_value = PanOf(channel, layer, drum);
 
-    // A part holds one set of settings. A note that needs others from those of a note on the part goes on a free part.
+    // A part holds one set of settings. A note whose settings differ from those of a note on the part goes on a free
+    // part.
     const double semitones = LayerSemitones(channel, layer);
     const auto apart = [&](const Layer& other)
     {
@@ -1042,7 +936,7 @@ void Performer::PlayNote(std::size_t channel_index, Layer& layer, const ScriptCo
             number = count - 1;
         }
 
-        const int32_t drum = bank.drum_notes[static_cast<std::size_t>(number)];
+        const int32_t drum = n64::ead_common::DrumObject(bank, number);
         if (drum == n64::kNoObject)
         {
             layer.stopped = true;
@@ -1091,8 +985,7 @@ void Performer::PlayNote(std::size_t channel_index, Layer& layer, const ScriptCo
         sound = found.id;
         tuned_sound = found.tuned;
         sound_bank = &bank;
-        const int32_t index = bank.program_instruments[static_cast<std::size_t>(chosen)];
-        const int instrument_release = bank.instruments[static_cast<std::size_t>(index)].release_rate;
+        const int instrument_release = ProgramInstrument(bank, chosen)->release_rate;
         key.bank = bank_number;
         key.program = chosen;
         if (later_ ? layer.release_rate > 0 : layer.envelope >= 0)
@@ -1204,7 +1097,7 @@ void Performer::FinishLaterNote(Layer& layer, const n64::EadBank& bank, const n6
     portamento.rate = std::clamp(speed, 1, 0x7FFF) / 256.0;
 }
 
-// Runs a layer's command. Returns true when the layer has what it needs for this tick.
+// Runs a layer's command. Returns true when the command is a note or a rest that ends the layer's tick.
 bool Performer::RunLayerCommand(std::size_t channel_index, Layer& layer, const ScriptCommand& command)
 {
     Channel& channel = channels_[channel_index];
@@ -1220,7 +1113,6 @@ bool Performer::RunLayerCommand(std::size_t channel_index, Layer& layer, const S
                 recorder_.Approximate("a layer's flags that drop its channel's values left out");
             }
         }
-
         break;
 
     case ScriptOp::kShortVelocity:
@@ -1429,7 +1321,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
             {
                 ChooseInstrument(channel, command.args[1]);
             }
-
             break;
         }
 
@@ -1496,7 +1387,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
             SendPans(index);
             SendReverb(index);
         }
-
         break;
 
     case ScriptOp::kChannelTranspose:
@@ -1517,7 +1407,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             recorder_.Approximate("a channel's sustain after a note's release left out");
         }
-
         break;
 
     case ScriptOp::kVibratoDepth:
@@ -1574,7 +1463,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
                 channel.dynamic_table = table_entry(channel.dynamic_table);
             }
         }
-
         break;
 
     case ScriptOp::kLoadPointer:
@@ -1591,7 +1479,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
                 written_[place] = bytes_[place];
             }
         }
-
         break;
 
     case ScriptOp::kAddPointer:
@@ -1645,7 +1532,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             recorder_.Approximate("a channel's random change of velocity or gate left out");
         }
-
         break;
 
     case ScriptOp::kFilter:
@@ -1665,7 +1551,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
                 recorder_.Approximate("a channel's high-pass filter left out");
             }
         }
-
         break;
 
     case ScriptOp::kGain:
@@ -1677,7 +1562,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             recorder_.Approximate("a channel's comb filter left out");
         }
-
         break;
 
     case ScriptOp::kDynamicCall:
@@ -1686,7 +1570,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
             script.stack[static_cast<std::size_t>(script.depth++)] = script.pc;
             script.pc = table_entry(channel.dynamic_table);
         }
-
         break;
 
     case ScriptOp::kLoadValue:
@@ -1709,7 +1592,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
                 bytes_[place] = static_cast<uint8_t>(channel.value + arg);
                 written_[place] = bytes_[place];
             }
-
             break;
         }
 
@@ -1731,7 +1613,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
             {
                 channel.value = -1;
             }
-
             break;
         }
 
@@ -1745,7 +1626,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             channel.io[low & 7] = -1;
         }
-
         break;
 
     case ScriptOp::kSubtractIo:
@@ -1775,7 +1655,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             StartLayer(index, LayerSlot(low), table_entry(channel.dynamic_table));
         }
-
         break;
 
     case ScriptOp::kFreeLayer:
@@ -1783,7 +1662,6 @@ void Performer::RunChannelCommand(std::size_t index, const ScriptCommand& comman
         {
             FreeLayer(index, channel.layers[LayerSlot(low)]);
         }
-
         break;
 
     case ScriptOp::kStartOtherChannel:
@@ -1963,7 +1841,6 @@ void Performer::RunSequence()
             {
                 SetTempo(tempo_ + arg * kTicksPerBeat);
             }
-
             break;
 
         case ScriptOp::kVolume:
@@ -1976,7 +1853,6 @@ void Performer::RunSequence()
                 fade_ += arg / 127.0;
                 SendEveryLevel();
             }
-
             break;
 
         case ScriptOp::kVolumeMode:
@@ -1994,7 +1870,6 @@ void Performer::RunSequence()
                 volume_state_ = 2;
                 fade_step_ = -fade_ / fade_updates_;
             }
-
             break;
 
         case ScriptOp::kVolumeScale:
@@ -2018,7 +1893,6 @@ void Performer::RunSequence()
                     }
                 }
             }
-
             break;
 
         case ScriptOp::kDisableChannels:
@@ -2030,7 +1904,6 @@ void Performer::RunSequence()
                     channels_[channel].used = false;
                 }
             }
-
             break;
 
         case ScriptOp::kShortVelocityTable:
@@ -2042,7 +1915,6 @@ void Performer::RunSequence()
                 {
                     std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(place), table.size(), table.begin());
                 }
-
                 break;
             }
 
@@ -2064,7 +1936,6 @@ void Performer::RunSequence()
                 value_ = static_cast<int8_t>((random_ >> 2) % static_cast<uint32_t>(arg == 0 ? 256 : arg));
                 recorder_.Approximate("a script's random choices taken from a fixed generator");
             }
-
             break;
 
         case ScriptOp::kStoreToSequence:
@@ -2075,7 +1946,6 @@ void Performer::RunSequence()
                     bytes_[place] = static_cast<uint8_t>(value_ + arg);
                     written_[place] = bytes_[place];
                 }
-
                 break;
             }
 
@@ -2089,7 +1959,6 @@ void Performer::RunSequence()
                     script_.pc = target;
                 }
             }
-
             break;
 
         case ScriptOp::kTestChannel:
@@ -2101,7 +1970,6 @@ void Performer::RunSequence()
             {
                 value_ = channels_[low & 15].finished ? 1 : 0;
             }
-
             break;
 
         case ScriptOp::kReadIo:
@@ -2117,7 +1985,6 @@ void Performer::RunSequence()
             {
                 value_ = variation_;
             }
-
             break;
 
         case ScriptOp::kWriteIo:
@@ -2129,7 +1996,6 @@ void Performer::RunSequence()
             {
                 variation_ = value_;
             }
-
             break;
 
         case ScriptOp::kSubtractIo:
@@ -2155,7 +2021,6 @@ void Performer::RunSequence()
             {
                 ports_[low & 7] = 0;
             }
-
             break;
 
         case ScriptOp::kRunSequence:
@@ -2170,7 +2035,6 @@ void Performer::RunSequence()
                 StartSequence(command.args[1]);
                 return;
             }
-
             break;
 
         case ScriptOp::kStartChannel:
@@ -2207,8 +2071,8 @@ void Performer::StartSequence(int number)
     filters_.clear();
     slow_loads_.clear();
     bank_set_ = place < settings_.bank_sets.size() ? settings_.bank_sets[place] : std::vector<uint8_t>();
-    std::ranges::copy(kDefaultVelocities, velocities_.begin());
-    std::ranges::copy(kDefaultGates, gates_.begin());
+    std::ranges::copy(n64::ead_tables::kShortVelocity, velocities_.begin());
+    std::ranges::copy(n64::ead_tables::kShortGate, gates_.begin());
     script_ = Script();
     script_stopped_ = false;
     delay_ = 0;
@@ -2284,7 +2148,7 @@ void Performer::RunFramesToTick()
     tempo_count_ -= threshold_;
 }
 
-// What goes on between ticks: the player's fade and the sweeps of notes, which run in each update.
+// What goes on between ticks: the player's fade and the sweeps of notes. Both run in each update.
 void Performer::AdvanceTime()
 {
     const double updates = UpdatesPerTick();
@@ -2540,8 +2404,7 @@ void Performer::Finish()
         SlideLoop();
 
         // The next pass starts at the end of the last. What it plays stays out, and the notes stop there.
-        midi::ClampNoteOffs(performance, tick_);
-        midi::CutAt(performance, tick_);
+        midi::EndPassAt(performance, tick_);
         performance.loop = loop_;
         performance.loops = options_.loops;
         performance.end_tick = tick_;
@@ -2622,96 +2485,6 @@ EadPerformance Performer::Run()
     return std::move(out_);
 }
 
-// The straight lines of an envelope, from a level of 0, up to the end of the list. A list that goes back holds its last
-// level there. The later engine scales each of an envelope's delays by its updates in a frame, against 4. The two
-// builds in between keep the shortest delays as they stand. Pokémon Stadium 2's code at 0x8000E810 starts a note whose
-// list opens with a skipped point at its first update's level, with no ramp from silence.
-EnvelopeShape ShapeOf(std::span<const n64::EadEnvelope::Point> envelope, EadEngine engine, EadLevels levels,
-                      int updates_per_frame, bool envelope_skip)
-{
-    EnvelopeShape shape;
-    shape.squared_lines = levels != EadLevels::kVolumesSquared;
-    shape.points.push_back({0.0, 0.0});
-    double time = 0.0;
-    bool start_at_target = false;
-    for (const n64::EadEnvelope::Point& point : envelope)
-    {
-        if (envelope_skip && point.delay == n64::kEnvelopeSkip)
-        {
-            start_at_target = start_at_target || shape.points.size() == 1;
-            continue;
-        }
-
-        if (point.delay <= 0)
-        {
-            shape.ends = point.delay == n64::kEnvelopeDisable;
-            break;
-        }
-
-        const int delay = IsLater(engine) || (engine != EadEngine::kEarly && point.delay >= 4)
-                              ? point.delay * updates_per_frame / 4
-                              : point.delay;
-        const double top = std::clamp(static_cast<double>(point.target) / kEnvelopeTop, 0.0, 1.0);
-        const auto level_of = [&](double value)
-        {
-            return levels == EadLevels::kEarly ? value : value * value;
-        };
-
-        if (start_at_target && shape.points.size() == 1)
-        {
-            const double first = level_of(top / std::max(delay, 1));
-            shape.points[0].level = first;
-            if (delay > 1)
-            {
-                shape.points.push_back({1.0, first});
-            }
-        }
-
-        time += std::max(delay, 1);
-        shape.points.push_back({time, level_of(top)});
-    }
-
-    return shape;
-}
-
-// A vibrato's LFO. The engine's curve moves further up than down. The LFO takes the middle of the curve as the note's
-// pitch, and half its span as its depth. Returns the shift in cents of that middle.
-double FitVibrato(Lfo& lfo, const EadPresetKey& key, double updates_per_second, EadEngine engine, bool inverse_vibrato)
-{
-    lfo.hz = updates_per_second * key.vibrato_rate / kVibratoPeriodUnits;
-    lfo.delay_ms = key.vibrato_delay * 1000.0 / updates_per_second;
-    const double extent = key.vibrato_depth / kVibratoDepthUnit;
-    if (inverse_vibrato)
-    {
-        // Pokémon Stadium 2's code at 0x8001BC5C: the scale is 65536 / (wave * depth + 65536), for a wave of up to
-        // 32767 either way. The curve moves further up than down.
-        const double up = -1200.0 * std::log2(std::max(1.0 - extent / 2.0, 1.0 / 64.0));
-        const double down = -1200.0 * std::log2(1.0 + extent / 2.0);
-        lfo.depth = (up - down) / 2.0;
-
-        return (up + down) / 2.0;
-    }
-
-    if (IsLater(engine))
-    {
-        // The later engine's curve is a sine in the scale between one plus the depth and its inverse. Its middle stays
-        // within a cent of the note for any depth that a sequence uses.
-        lfo.depth = 1200.0 * std::log2(1.0 + extent);
-        return 0.0;
-    }
-
-    const auto cents_at = [&](double steps)
-    {
-        return 1200.0 * std::log2(std::max(1.0 + extent * (std::pow(2.0, steps / kPitchScaleSteps) - 1.0), 1.0 / 64.0));
-    };
-
-    const double up = cents_at(kVibratoPeakSteps);
-    const double down = cents_at(-kVibratoPeakSteps);
-    lfo.depth = (up - down) / 2.0;
-
-    return (up + down) / 2.0;
-}
-
 } // namespace
 
 EadPerformance PerformEad(const EadPerformSettings& settings, const PerformOptions& options)
@@ -2719,516 +2492,6 @@ EadPerformance PerformEad(const EadPerformSettings& settings, const PerformOptio
     Performer performer(settings, options);
 
     return performer.Run();
-}
-
-std::vector<Zone> EadZones(const EadPresetKey& key, const n64::EadBank& bank, const EadPerformSettings& settings,
-                           std::vector<int32_t>& sample_of_zone)
-{
-    std::vector<Zone> zones;
-    sample_of_zone.clear();
-    const int updates_per_frame = settings.clock.updates_per_frame;
-    const double updates = updates_per_frame * settings.clock.frame_rate;
-    const double rate_ratio = settings.clock.wave_rate / settings.clock.output_rate;
-    const auto fade_of = [&](int rate)
-    {
-        return ReleaseFall(settings.engine, rate, updates_per_frame);
-    };
-
-    Lfo lfo;
-    double vibrato_shift = 0.0;
-    if (key.vibrato_depth != 0)
-    {
-        vibrato_shift = FitVibrato(lfo, key, updates, settings.engine, settings.inverse_vibrato);
-    }
-
-    const auto add = [&](int low_key, int high_key, const n64::EadTunedSample& tuned,
-                         std::span<const n64::EadEnvelope::Point> envelope, int release_rate, double pan, bool drum)
-    {
-        if (tuned.sample == n64::kNoObject || tuned.tuning <= 0.0F || low_key > high_key)
-        {
-            return;
-        }
-
-        Zone zone;
-        zone.low_key = low_key;
-        zone.high_key = high_key;
-        zone.root_key = drum ? low_key : kRootKey;
-        zone.tune_cents = 1200.0 * std::log2(static_cast<double>(tuned.tuning)) + vibrato_shift;
-        zone.follows_key = !drum;
-        zone.pan = pan;
-        if (key.vibrato_depth != 0)
-        {
-            zone.vibrato = lfo;
-        }
-
-        const EnvelopeShape shape =
-            ShapeOf(envelope, settings.engine, settings.levels, updates_per_frame, settings.envelope_skip);
-        const LaterLowPass& low_pass = kLaterLowPasses[static_cast<std::size_t>(key.low_pass & 0xF)];
-        zone.low_pass_hz = low_pass.hz;
-        zone.gain =
-            FitEnvelope(zone, shape, updates, fade_of(release_rate)) * FullScale(settings.levels) * low_pass.gain;
-        if (drum)
-        {
-            zones.push_back(zone);
-            sample_of_zone.push_back(tuned.sample);
-            return;
-        }
-
-        // Keys past the resampler's limit play at the limit.
-        const double limit =
-            kRootKey + 12.0 * std::log2(kHighestRate / (static_cast<double>(tuned.tuning) * rate_ratio));
-        const int limit_key = static_cast<int>(std::ceil(limit));
-        if (low_key < limit_key)
-        {
-            Zone below = zone;
-            below.high_key = std::min(high_key, limit_key - 1);
-            zones.push_back(below);
-            sample_of_zone.push_back(tuned.sample);
-        }
-
-        if (high_key >= limit_key)
-        {
-            zone.low_key = std::max(low_key, limit_key);
-            zone.follows_key = false;
-            zone.tune_cents = 1200.0 * std::log2(kHighestRate / rate_ratio) + vibrato_shift;
-            zones.push_back(zone);
-            sample_of_zone.push_back(tuned.sample);
-        }
-    };
-
-    if (key.program < 0)
-    {
-        for (std::size_t note = 0; note < bank.drum_notes.size() && note + kKeyOffset <= 127; note++)
-        {
-            const int32_t index = bank.drum_notes[note];
-            if (index == n64::kNoObject)
-            {
-                continue;
-            }
-
-            const n64::EadDrum& drum = bank.drums[static_cast<std::size_t>(index)];
-            if (drum.envelope == n64::kNoObject)
-            {
-                continue;
-            }
-
-            const double weight = key.drum_pan_weight / 128.0;
-            const double pan = std::clamp((drum.pan / 64.0 - 1.0) * (1.0 - weight), -1.0, 1.0);
-            const int midi_key = static_cast<int>(note) + kKeyOffset;
-            add(midi_key, midi_key, drum.sound, bank.envelopes[static_cast<std::size_t>(drum.envelope)].points,
-                drum.release_rate, pan, true);
-        }
-
-        return zones;
-    }
-
-    const n64::EadInstrument& instrument =
-        bank.instruments[static_cast<std::size_t>(bank.program_instruments[static_cast<std::size_t>(key.program)])];
-    std::vector<n64::EadEnvelope::Point> channel_envelope;
-    if (key.envelope >= 0)
-    {
-        // A channel's envelope lies in the sequence.
-        for (std::size_t place = static_cast<std::size_t>(key.envelope); place + 4 <= settings.sequence.size();
-             place += 4)
-        {
-            const n64::EadEnvelope::Point point = {static_cast<int16_t>(Be16At(settings.sequence, place)),
-                                                   static_cast<int16_t>(Be16At(settings.sequence, place + 2))};
-            channel_envelope.push_back(point);
-            if (point.delay <= 0)
-            {
-                break;
-            }
-        }
-    }
-
-    std::span<const n64::EadEnvelope::Point> envelope = channel_envelope;
-    if (key.envelope < 0)
-    {
-        envelope = instrument.envelope != n64::kNoObject
-                       ? std::span<const n64::EadEnvelope::Point>(
-                             bank.envelopes[static_cast<std::size_t>(instrument.envelope)].points)
-                       : std::span<const n64::EadEnvelope::Point>(kDefaultEnvelope);
-    }
-
-    int release = key.release_rate >= 0 ? key.release_rate : instrument.release_rate;
-    if (release == 0 && !IsLater(settings.engine))
-    {
-        release = kDefaultReleaseRate;
-    }
-
-    const int top_key = 127;
-    const int low_end = std::min(instrument.normal_range_low + kKeyOffset, top_key + 1);
-    const int high_start = std::min(instrument.normal_range_high + 1 + kKeyOffset, top_key + 1);
-    add(0, low_end - 1, instrument.low, envelope, release, 0.0, false);
-    add(low_end, high_start - 1, instrument.normal, envelope, release, 0.0, false);
-    add(high_start, top_key, instrument.high, envelope, release, 0.0, false);
-
-    return zones;
-}
-
-std::unique_ptr<EadGame> EadGame::Open(std::span<const uint8_t> image, const EadProfile& profile)
-{
-    if (IsLater(profile.engine))
-    {
-        std::optional<n64::EadLaterFiles> files = n64::EadLaterFiles::Read(image);
-        if (!files)
-        {
-            return nullptr;
-        }
-
-        std::unique_ptr<EadGame> game(new EadGame());
-        game->image_ = image;
-        game->profile_ = profile;
-        game->later_files_ = std::move(files);
-        game->bank_sets_ = game->later_files_->bank_sets;
-        for (const std::vector<uint8_t>& sequence : game->later_files_->sequences)
-        {
-            game->sequences_.emplace_back(sequence);
-        }
-
-        return game;
-    }
-
-    const std::optional<n64::EarlySoundData> data = n64::FindEarlySoundData(image);
-    if (!data)
-    {
-        return nullptr;
-    }
-
-    std::unique_ptr<EadGame> game(new EadGame());
-    game->image_ = image;
-    game->profile_ = profile;
-    const auto entries = [&](std::size_t offset, uint16_t revision, std::vector<std::span<const uint8_t>>& out)
-    {
-        const n64::SeqFile file = n64::SeqFile::Parse(image.subspan(offset), revision);
-        for (const n64::SeqFile::Entry& entry : file.Entries())
-        {
-            out.push_back(image.subspan(offset + entry.offset, entry.length));
-        }
-    };
-
-    entries(data->sequences, n64::kEarlySequenceFileRevision, game->sequences_);
-    entries(data->banks, n64::kEarlyBankFileRevision, game->bank_files_);
-    entries(data->samples, n64::kEarlySampleFileRevision, game->sample_files_);
-    if (data->bank_sets)
-    {
-        game->bank_sets_ = n64::ParseEarlyBankSets(image.subspan(*data->bank_sets), game->sequences_.size());
-    }
-
-    return game;
-}
-
-std::vector<ntdlib::sequence_export::Sequence> EadGame::Sequences() const
-{
-    // A track that the profile lists comes after the sequences in the numbering.
-    std::vector<ntdlib::sequence_export::Sequence> list;
-    for (std::size_t index = 0; index < sequences_.size(); index++)
-    {
-        if (std::ranges::find(profile_.effect_sequences, index) != profile_.effect_sequences.end() ||
-            sequences_[index].empty())
-        {
-            continue;
-        }
-
-        // A later engine's table can name one sequence twice. Without a track of its own, the second adds nothing.
-        const bool has_track =
-            std::ranges::any_of(profile_.tracks, [&](const EadTrack& track) { return track.sequence == index; });
-        const auto same_as = [&](std::size_t earlier)
-        {
-            return std::ranges::equal(sequences_[earlier], sequences_[index]) &&
-                   bank_sets_[earlier] == bank_sets_[index];
-        };
-
-        if (!has_track && later_files_ && std::ranges::any_of(std::views::iota(std::size_t{0}, index), same_as))
-        {
-            continue;
-        }
-
-        if (!has_track)
-        {
-            list.push_back({index, SequenceName(index, profile_.names)});
-        }
-
-        for (std::size_t i = 0; i < profile_.tracks.size(); i++)
-        {
-            if (profile_.tracks[i].sequence == index)
-            {
-                const char* track_name = profile_.tracks[i].name;
-                if (track_name != nullptr)
-                {
-                    const std::vector<SongName> name = {{index, track_name}};
-                    list.push_back({sequences_.size() + i, SequenceName(index, name)});
-                }
-                else
-                {
-                    list.push_back({sequences_.size() + i, SequenceName(index, profile_.names)});
-                }
-            }
-        }
-    }
-
-    return list;
-}
-
-const n64::EadBank& EadGame::BankAt(int number)
-{
-    const auto found = banks_.find(number);
-    if (found != banks_.end())
-    {
-        return found->second;
-    }
-
-    if (later_files_)
-    {
-        return banks_.emplace(number, later_files_->banks.at(static_cast<std::size_t>(number))).first->second;
-    }
-
-    return banks_.emplace(number, n64::EadBank::ParseEarly(bank_files_.at(static_cast<std::size_t>(number))))
-        .first->second;
-}
-
-std::shared_ptr<const Wave> EadGame::WaveAt(int bank_number, int32_t sample, int gain)
-{
-    if (gain != 0)
-    {
-        const auto key = std::make_tuple(bank_number, sample, gain);
-        const auto found = gained_waves_.find(key);
-        if (found != gained_waves_.end())
-        {
-            return found->second;
-        }
-
-        // The engine multiplies a note's samples by the gain and limits them to 16 bits.
-        auto out = std::make_shared<Wave>(*WaveAt(bank_number, sample, 0));
-        char suffix[8];
-        std::snprintf(suffix, sizeof(suffix), "g%02X", static_cast<unsigned>(gain));
-        out->name += suffix;
-        for (std::vector<int16_t>& channel : out->pcm.channels)
-        {
-            for (int16_t& value : channel)
-            {
-                value = static_cast<int16_t>(std::clamp((value * gain) >> 4, -32768, 32767));
-            }
-        }
-
-        gained_waves_[key] = out;
-
-        return out;
-    }
-
-    const auto key = std::make_tuple(bank_number, sample);
-    const auto found = waves_.find(key);
-    if (found != waves_.end())
-    {
-        return found->second;
-    }
-
-    const n64::EadBank& bank = BankAt(bank_number);
-    const n64::EadSample& object = bank.samples.at(static_cast<std::size_t>(sample));
-    std::span<const uint8_t> file;
-    if (later_files_)
-    {
-        const std::array<uint32_t, 2>& places = later_files_->sample_places.at(static_cast<std::size_t>(bank_number));
-        file = image_.subspan(places[object.medium < 2 ? object.medium : 0]);
-    }
-    else
-    {
-        file = sample_files_.at(static_cast<std::size_t>(bank_number));
-    }
-
-    const std::span<const uint8_t> bytes = file.subspan(object.address, object.size);
-    const bool small = object.codec == n64::kEadCodecSmallAdpcm;
-    const std::size_t frame_size = small ? n64::kVadpcmSmallFrameSize : n64::kVadpcmFrameSize;
-    const auto decode = [&](std::span<const uint8_t> frames, const n64::VadpcmBook& book, n64::VadpcmState& state)
-    {
-        return small ? n64::DecodeVadpcmSmall(frames, book, state) : n64::DecodeVadpcm(frames, book, state);
-    };
-
-    auto out = std::make_shared<Wave>();
-    char name[32];
-    std::snprintf(name, sizeof(name), "b%02Xs%06X", static_cast<unsigned>(bank_number), object.address);
-    out->name = name;
-    out->rate = static_cast<uint32_t>(profile_.wave_rate);
-
-    if (object.codec != n64::kEadCodecAdpcm && !small)
-    {
-        // The engines decode nothing else from an image, except signed bytes. Their other kinds play as silence.
-        std::vector<int16_t> pcm;
-        if (object.codec == n64::kEadCodecS8)
-        {
-            pcm.reserve(bytes.size());
-            for (const uint8_t byte : bytes)
-            {
-                pcm.push_back(static_cast<int16_t>(static_cast<int8_t>(byte) * 256));
-            }
-        }
-
-        if (pcm.empty())
-        {
-            pcm.assign(n64::kVadpcmFrameSamples, 0);
-        }
-
-        out->pcm.channels.push_back(std::move(pcm));
-        waves_[key] = out;
-
-        return out;
-    }
-
-    const n64::VadpcmBook& book = bank.books.at(static_cast<std::size_t>(object.book)).book;
-    n64::VadpcmState start_state{};
-    std::vector<int16_t> samples = decode(bytes, book, start_state);
-    if (object.loop != n64::kNoObject)
-    {
-        const n64::BankLoop& loop = bank.loops.at(static_cast<std::size_t>(object.loop));
-        if (loop.count != 0 && loop.end > loop.start && loop.end <= samples.size())
-        {
-            samples.resize(loop.end);
-            out->pcm.loop = true;
-            out->pcm.loop_start = loop.start;
-            out->pcm.loop_end = loop.end;
-            if (loop.has_state)
-            {
-                // A wave's repeats start from the state that the loop holds, at the frame of the loop's start. Where
-                // they differ from the first pass, the file keeps a second pass to loop on.
-                const std::size_t first_frame = loop.start / n64::kVadpcmFrameSamples;
-                const std::size_t skip = loop.start - first_frame * n64::kVadpcmFrameSamples;
-                const std::size_t length = loop.end - loop.start;
-                n64::VadpcmState state = loop.state;
-                const std::size_t next_place = (first_frame + 1) * frame_size;
-                if (next_place <= bytes.size())
-                {
-                    const std::vector<int16_t> rest = decode(bytes.subspan(next_place), book, state);
-                    std::vector<int16_t> repeat(loop.state.begin(), loop.state.end());
-                    repeat.insert(repeat.end(), rest.begin(), rest.end());
-                    if (repeat.size() >= skip + length &&
-                        !std::equal(samples.begin() + static_cast<std::ptrdiff_t>(loop.start), samples.end(),
-                                    repeat.begin() + static_cast<std::ptrdiff_t>(skip)))
-                    {
-                        samples.insert(samples.end(), repeat.begin() + static_cast<std::ptrdiff_t>(skip),
-                                       repeat.begin() + static_cast<std::ptrdiff_t>(skip + length));
-                        out->pcm.loop_start = loop.end;
-                        out->pcm.loop_end = loop.end + static_cast<uint32_t>(length);
-                    }
-                }
-            }
-        }
-        else if (loop.count == 0 && loop.end > 0 && loop.end < samples.size())
-        {
-            samples.resize(loop.end);
-        }
-    }
-
-    out->pcm.channels.push_back(std::move(samples));
-    waves_[key] = out;
-
-    return out;
-}
-
-Conversion EadGame::Convert(std::size_t index, const PerformOptions& options)
-{
-    if (index >= sequences_.size())
-    {
-        const EadTrack& track = profile_.tracks[index - sequences_.size()];
-        if (track.name == nullptr)
-        {
-            return ConvertTrack(track, SequenceName(track.sequence, profile_.names), options);
-        }
-
-        const std::vector<SongName> name = {{track.sequence, track.name}};
-
-        return ConvertTrack(track, SequenceName(track.sequence, name), options);
-    }
-
-    return ConvertTrack({.sequence = index, .variation = profile_.variation}, SequenceName(index, profile_.names),
-                        options);
-}
-
-Conversion EadGame::ConvertTrack(const EadTrack& track, const std::string& name, const PerformOptions& options)
-{
-    const std::size_t index = track.sequence;
-    EadPerformSettings settings;
-    settings.engine = profile_.engine;
-    settings.levels = profile_.levels;
-    settings.envelope_skip = profile_.envelope_skip;
-    settings.channel_layers = profile_.channel_layers;
-    settings.inverse_vibrato = profile_.inverse_vibrato;
-    settings.sequence = sequences_.at(index);
-    if (index < bank_sets_.size())
-    {
-        settings.bank_set = bank_sets_[index];
-    }
-
-    for (const uint8_t number : settings.bank_set)
-    {
-        BankAt(number);
-    }
-
-    settings.banks = &banks_;
-    settings.clock.updates_per_frame = profile_.updates_per_frame;
-    settings.clock.output_rate = profile_.output_rate;
-    settings.clock.wave_rate = profile_.wave_rate;
-    settings.player_scale = profile_.player_volume;
-    settings.variation = track.variation;
-    settings.silent_channels = track.silent_channels;
-    settings.tempo_change = track.tempo_change;
-    std::ranges::copy(track.ports, settings.ports.begin());
-    settings.call = track.call;
-    settings.sequences = sequences_;
-    settings.bank_sets = bank_sets_;
-    if (later_files_)
-    {
-        // A script may start or load any other sequence.
-        for (std::size_t bank = 0; bank < later_files_->banks.size(); bank++)
-        {
-            BankAt(static_cast<int>(bank));
-        }
-    }
-
-    // The game's code scales the player by a level for the sequence.
-    if (profile_.player_level_count != 0 && track.sequence >= profile_.first_player_level &&
-        track.sequence - profile_.first_player_level < profile_.player_level_count)
-    {
-        constexpr int kHighestLevel = 127;
-        int level = image_[profile_.player_levels + track.sequence - profile_.first_player_level];
-        if (level > kHighestLevel)
-        {
-            level = image_[profile_.player_levels_indirect + static_cast<std::size_t>(level - kHighestLevel - 1)];
-        }
-
-        settings.player_scale = profile_.player_volume * level / kHighestLevel;
-    }
-
-    // A table in the game's code gives the song's volume, or the script does.
-    if (index < profile_.song_volumes_count)
-    {
-        settings.song_volume = image_[profile_.song_volumes + index] / 127.0;
-    }
-
-    // The game's code can give a sequence another volume.
-    if (track.song_volume >= 0)
-    {
-        settings.song_volume = track.song_volume / 127.0;
-    }
-
-    EadPerformance played = PerformEad(settings, options);
-    for (const EadPresetKey& key : played.presets)
-    {
-        char preset_name[32];
-        std::snprintf(preset_name, sizeof(preset_name), "b%d p%d", key.bank, key.program);
-
-        Instrument preset;
-        preset.name = preset_name;
-        std::vector<int32_t> samples;
-        preset.zones = EadZones(key, BankAt(key.bank), settings, samples);
-        for (std::size_t i = 0; i < preset.zones.size(); i++)
-        {
-            preset.zones[i].wave = WaveAt(key.bank, samples[i], key.sample_gain);
-        }
-
-        played.performance.presets.push_back(std::move(preset));
-    }
-
-    return BuildFiles(std::move(played.performance), name, options.program);
 }
 
 } // namespace ultralib::sequence_export::n64

@@ -8,8 +8,8 @@
 #include <cstdint>
 #include <utility>
 
-#include "xsflib/bytes.h"
-
+#include "al_synth_constants.h"
+#include "compact_synthesis.h"
 #include "equal_power.h"
 #include "sbn_player_constants.h"
 #include "ultralib/n64/audio_list.h"
@@ -22,6 +22,28 @@ namespace ultralib::n64
 namespace
 {
 
+using al_synth_constants::kAdpcmFrameBytes;
+using al_synth_constants::kAdpcmFrameSamples;
+using al_synth_constants::kMaxRatio;
+using al_synth_constants::kUnityPitch;
+using compact_synthesis::kAddressMask;
+using compact_synthesis::kAuxLeft;
+using compact_synthesis::kAuxRight;
+using compact_synthesis::kMainLeft;
+using compact_synthesis::kMainRight;
+using compact_synthesis::kOpLoad;
+using compact_synthesis::kOpMix;
+using compact_synthesis::kOpMove;
+using compact_synthesis::kOpSave;
+using compact_synthesis::PushAdpcm;
+using compact_synthesis::PushAlignedLoad;
+using compact_synthesis::PushDelayLoad;
+using compact_synthesis::PushEnvMixer;
+using compact_synthesis::PushLowPass;
+using compact_synthesis::PushResample;
+using compact_synthesis::Ramp;
+using compact_synthesis::Rate;
+using compact_synthesis::SideLevel;
 using sbn_player_constants::kChunk;
 using sbn_player_constants::kChunkBytes;
 using sbn_player_constants::kDelayLeft;
@@ -29,28 +51,13 @@ using sbn_player_constants::kDelayNone;
 using sbn_player_constants::kFxLength;
 
 constexpr int kDecoderOut = 0x170;
-constexpr int kDecoderIn = 0;
 constexpr int kTemp = 0;
-constexpr uint32_t kMainLeft = 0x4E0;
-constexpr uint32_t kMainRight = 0x650;
-constexpr uint32_t kAuxLeft = 0x7C0;
-constexpr uint32_t kAuxRight = 0x930;
-constexpr uint32_t kOpLoad = 0x04000000;
-constexpr uint32_t kOpSave = 0x06000000;
-constexpr uint32_t kOpMix = 0x0C000000;
-constexpr uint32_t kOpMove = 0x0A000000;
-constexpr uint32_t kAddressMask = 0xFFFFFF;
-constexpr uint32_t kDmemMask = 0xFFF;
-constexpr float kUnityPitch = 32768.0F;
-constexpr float kMaxRatio = 1.99996F;
-constexpr int kFrameSamples = 16;
-constexpr int kFrameBytes = 9;
 
 struct EffectSection
 {
     int input;
     int output;
-    int feed_back;
+    int feedback;
     int feed_forward;
     int gain;
     int rate;
@@ -97,53 +104,6 @@ const EffectPreset& PresetOf(uint8_t type)
     }
 }
 
-int16_t Ramp(int16_t volume, int32_t samples, int16_t rate_high, uint16_t rate_low)
-{
-    const int32_t steps = samples >> 3;
-    if (steps == 0)
-    {
-        return volume;
-    }
-
-    int32_t low = static_cast<int32_t>(rate_low) * steps;
-    low >>= 16;
-    low += static_cast<int32_t>(rate_high) * steps;
-
-    return static_cast<int16_t>(volume + low);
-}
-
-int16_t Rate(double volume, double target, int32_t count, uint16_t& rate_low)
-{
-    if (count == 0)
-    {
-        if (target >= volume)
-        {
-            rate_low = 0xFFFF;
-
-            return 0x7FFF;
-        }
-
-        rate_low = 0;
-
-        return 0;
-    }
-
-    const double inverse = 1.0 / static_cast<double>(count);
-    target = std::max(target, 1.0);
-    if (volume <= 0.0)
-    {
-        volume = 1.0;
-    }
-
-    const double step = (target - volume) * inverse * 8.0;
-    const auto whole = static_cast<int16_t>(static_cast<int32_t>(step));
-    const double above = step - static_cast<double>(whole) + 1.0;
-    const auto carry = static_cast<int16_t>(static_cast<int32_t>(above));
-    rate_low = static_cast<uint16_t>(static_cast<uint32_t>((above - static_cast<double>(carry)) * 65535.0));
-
-    return static_cast<int16_t>(whole - 1 + carry);
-}
-
 // Appends a command that loads `bytes` bytes from `address` to DMEM at `dmem`.
 void PushLoad(AudioList& list, uint32_t bytes, uint32_t dmem, uint32_t address)
 {
@@ -160,19 +120,6 @@ void PushSave(AudioList& list, uint32_t bytes, uint32_t dmem, uint32_t address)
 void PushMix(AudioList& list, uint16_t gain, uint32_t in, uint32_t out)
 {
     list.commands.push_back({kOpMix | gain, (in << 16) | out});
-}
-
-// Appends a command that loads the `bytes` bytes at `memory_in` to DMEM at `dmem`, from the 8-byte boundary at or
-// before `memory_in`. Returns the distance from that boundary to `memory_in`.
-uint32_t LoadAligned(AudioList& list, int64_t memory_in, int32_t bytes, int dmem)
-{
-    const auto location = static_cast<uint32_t>(memory_in);
-    const uint32_t align = location & 7;
-    const uint32_t total = static_cast<uint32_t>(bytes) + align;
-    list.commands.push_back(
-        {kOpLoad | (((total + 8 - (total & 7)) & kDmemMask) << 12) | static_cast<uint32_t>(dmem), location - align});
-
-    return align;
 }
 
 // Wraps a place before the start of a delay line around to the end of the line.
@@ -255,8 +202,8 @@ void SbnPlayer::SynthStartVoice(int voice)
     {
         const std::size_t left = config_.stereo ? held.mixer_pan : 64;
         const std::size_t right = config_.stereo ? 127U - held.mixer_pan : 64;
-        held.current_left = static_cast<int16_t>((held.mixer_volume * kEqualPower[left]) >> 15);
-        held.current_right = static_cast<int16_t>((held.mixer_volume * kEqualPower[right]) >> 15);
+        held.current_left = SideLevel(held.mixer_volume, left);
+        held.current_right = SideLevel(held.mixer_volume, right);
     }
 
     held.ratio = held.pitch_ratio;
@@ -269,8 +216,8 @@ void SbnPlayer::RefreshMixer(Voice& voice)
         voice.mixer_delta = voice.segment_end;
         const std::size_t left = config_.stereo ? voice.mixer_pan : 64;
         const std::size_t right = config_.stereo ? 127U - voice.mixer_pan : 64;
-        voice.current_left = static_cast<int16_t>((voice.mixer_volume * kEqualPower[left]) >> 15);
-        voice.current_right = static_cast<int16_t>((voice.mixer_volume * kEqualPower[right]) >> 15);
+        voice.current_left = SideLevel(voice.mixer_volume, left);
+        voice.current_right = SideLevel(voice.mixer_volume, right);
     }
     else
     {
@@ -322,33 +269,8 @@ void SbnPlayer::SynthSetVolumeDelta(int voice, int16_t volume, int32_t delta)
     held.mixer_dirty = true;
 }
 
-void SbnPlayer::InitFilter(LowPass& filter, AudioMemory& memory)
+void SbnPlayer::LoadEffect(Bus& /*bus*/, Effect& effect, uint8_t type)
 {
-    constexpr int kScale = 16384;
-    filter.first = true;
-    const int16_t time_constant = static_cast<int16_t>(filter.cutoff >> 1);
-    filter.gain = static_cast<int16_t>(kScale - time_constant);
-    filter.coefficients.fill(0);
-    filter.coefficients[8] = time_constant;
-    double attenuation = static_cast<double>(time_constant) / kScale;
-    for (std::size_t i = 9; i < filter.coefficients.size(); i++)
-    {
-        attenuation *= static_cast<double>(time_constant) / kScale;
-        filter.coefficients[i] = static_cast<int16_t>(attenuation * kScale);
-    }
-
-    std::array<uint8_t, 32> bytes = {};
-    for (std::size_t i = 0; i < filter.coefficients.size(); i++)
-    {
-        xsflib::StoreBe16(bytes.data() + i * 2, static_cast<uint16_t>(filter.coefficients[i]));
-    }
-
-    memory.Write(filter.coefficients_address, bytes.data(), bytes.size());
-}
-
-void SbnPlayer::LoadEffect(Bus& bus, Effect& effect, uint8_t type)
-{
-    (void)bus;
     constexpr double kConvert = 173123.404906676;
     const EffectPreset& preset = PresetOf(type);
     effect.delay_count = static_cast<int>(preset.sections.size());
@@ -362,7 +284,7 @@ void SbnPlayer::LoadEffect(Bus& bus, Effect& effect, uint8_t type)
         Delay& delay = effect.delays[i];
         delay.input = static_cast<uint32_t>(section.input * kChunk);
         delay.output = static_cast<uint32_t>(section.output * kChunk);
-        delay.feed_back = static_cast<int16_t>(section.feed_back);
+        delay.feedback = static_cast<int16_t>(section.feedback);
         delay.feed_forward = static_cast<int16_t>(section.feed_forward);
         delay.gain = static_cast<int16_t>(section.gain);
         delay.has_resampler = section.rate != 0;
@@ -378,11 +300,11 @@ void SbnPlayer::LoadEffect(Bus& bus, Effect& effect, uint8_t type)
             delay.resampler_first = true;
         }
 
-        delay.has_filter = section.cutoff != 0;
-        if (delay.has_filter)
+        delay.has_low_pass = section.cutoff != 0;
+        if (delay.has_low_pass)
         {
-            delay.filter.cutoff = static_cast<int16_t>(section.cutoff);
-            InitFilter(delay.filter, *build_memory_);
+            delay.low_pass.cutoff = static_cast<int16_t>(section.cutoff);
+            compact_synthesis::InitLowPass(*build_memory_, delay.low_pass);
         }
     }
 }
@@ -507,30 +429,8 @@ void SbnPlayer::AccumulateBus(AudioList& list, const Bus& bus, bool first_bus) c
     PushSave(list, kBoth, kTemp, dry_accumulator_);
 }
 
-void SbnPlayer::DecodeChunk(AudioList& list, Voice& voice, const Wave& wave, int tsam, int bytes, int16_t out,
-                            uint32_t flags)
+void SbnPlayer::PullVoice(AudioList& list, int index, AudioMemory& /*memory*/)
 {
-    (void)wave;
-    uint32_t align = 0;
-    if (bytes > 0)
-    {
-        align = LoadAligned(list, voice.memory_in, bytes, kDecoderIn);
-    }
-
-    if ((flags & kAudioFlagLoop) != 0)
-    {
-        list.SetLoop(voice.decoder_loop_state);
-    }
-
-    list.commands.push_back({static_cast<uint32_t>(kAudioAdpcm) << 24 | (voice.decoder_state & kAddressMask),
-                             (flags << 28) | ((static_cast<uint32_t>(tsam * 2) & kDmemMask) << 16) |
-                                 ((align & 0xF) << 12) | (static_cast<uint32_t>(out) & kDmemMask)});
-    voice.decoder_first = false;
-}
-
-void SbnPlayer::PullVoice(AudioList& list, int index, AudioMemory& memory)
-{
-    (void)memory;
     Voice& voice = voices_[static_cast<std::size_t>(index)];
     if (!voice.playing)
     {
@@ -539,7 +439,11 @@ void SbnPlayer::PullVoice(AudioList& list, int index, AudioMemory& memory)
 
     const Wave& wave = waves_[static_cast<std::size_t>(voice.physical_wave)];
     int out = kDecoderOut;
-    voice.ratio = std::min(voice.ratio, kMaxRatio);
+    if (voice.ratio > kMaxRatio)
+    {
+        voice.ratio = static_cast<float>(kMaxRatio);
+    }
+
     voice.ratio = static_cast<float>(static_cast<int32_t>(voice.ratio * kUnityPitch));
     voice.ratio = voice.ratio / kUnityPitch;
     const float exact = voice.resampler_delta + voice.ratio * static_cast<float>(kChunk);
@@ -571,12 +475,7 @@ void SbnPlayer::PullVoice(AudioList& list, int index, AudioMemory& memory)
         }
     }
 
-    const auto increment = static_cast<int32_t>(voice.ratio * kUnityPitch);
-    list.commands.push_back({static_cast<uint32_t>(kAudioResample) << 24 | (voice.resampler_state & kAddressMask),
-                             (voice.resampler_first ? 1U << 30 : 0U) |
-                                 ((static_cast<uint32_t>(increment) & 0xFFFF) << 14) |
-                                 ((static_cast<uint32_t>(out) & kDmemMask) << 2)});
-    voice.resampler_first = false;
+    PushResample(list, voice.resampler_state, voice.resampler_first, voice.ratio, static_cast<uint32_t>(out), 0);
     MixVoice(list, voice);
     voice.mixer_delta += kChunk;
     if (voice.segment_end < voice.mixer_delta)
@@ -606,14 +505,14 @@ void SbnPlayer::DecodeAdpcmLoop(AudioList& list, Voice& voice, const Wave& wave,
 {
     const auto loop_end = static_cast<int64_t>(voice.loop_end_sample);
     int32_t samples = static_cast<int32_t>(loop_end - voice.sample);
-    const int32_t left = voice.last_sample != 0 ? kFrameSamples - voice.last_sample : 0;
+    const int32_t left = voice.last_sample != 0 ? kAdpcmFrameSamples - voice.last_sample : 0;
     int32_t tsam = std::max(samples - left, 0);
-    int32_t frames = (tsam + kFrameSamples - 1) >> 4;
-    int32_t bytes = frames * kFrameBytes;
-    DecodeChunk(list, voice, wave, tsam, bytes, static_cast<int16_t>(out), voice.decoder_first ? kAudioFlagInit : 0U);
-    out += voice.last_sample != 0 ? voice.last_sample << 1 : kFrameSamples << 1;
+    int32_t frames = (tsam + kAdpcmFrameSamples - 1) >> 4;
+    int32_t bytes = frames * kAdpcmFrameBytes;
+    PushAdpcm(list, voice, tsam, bytes, static_cast<int16_t>(out), voice.decoder_first ? kAudioFlagInit : 0U);
+    out += voice.last_sample != 0 ? voice.last_sample << 1 : kAdpcmFrameSamples << 1;
     voice.last_sample = static_cast<int32_t>(voice.loop_start_sample & 0xF);
-    voice.memory_in = static_cast<int64_t>(wave.data) + kFrameBytes * (voice.loop_start_sample >> 4);
+    voice.memory_in = static_cast<int64_t>(wave.data) + kAdpcmFrameBytes * (voice.loop_start_sample >> 4);
     voice.sample = static_cast<int32_t>(voice.loop_start_sample);
     int buffer_end = out;
     while (count > samples)
@@ -627,29 +526,29 @@ void SbnPlayer::DecodeAdpcmLoop(AudioList& list, Voice& voice, const Wave& wave,
         }
 
         samples = std::min<int32_t>(count, static_cast<int32_t>(voice.loop_end_sample - voice.loop_start_sample));
-        tsam = std::max(samples - kFrameSamples + voice.last_sample, 0);
-        frames = (tsam + kFrameSamples - 1) >> 4;
-        bytes = frames * kFrameBytes;
-        DecodeChunk(list, voice, wave, tsam, bytes, static_cast<int16_t>(place),
-                    (voice.decoder_first ? kAudioFlagInit : 0U) | kAudioFlagLoop);
+        tsam = std::max(samples - kAdpcmFrameSamples + voice.last_sample, 0);
+        frames = (tsam + kAdpcmFrameSamples - 1) >> 4;
+        bytes = frames * kAdpcmFrameBytes;
+        PushAdpcm(list, voice, tsam, bytes, static_cast<int16_t>(place),
+                  (voice.decoder_first ? kAudioFlagInit : 0U) | kAudioFlagLoop);
         list.commands.push_back({kOpMove | (static_cast<uint32_t>(place + (voice.last_sample << 1)) & kAddressMask),
                                  (static_cast<uint32_t>(buffer_end) << 16) | static_cast<uint32_t>(samples << 1)});
     }
 
     voice.last_sample = (count + voice.last_sample) & 0xF;
     voice.sample += count;
-    voice.memory_in += static_cast<int64_t>(kFrameBytes) * frames;
+    voice.memory_in += static_cast<int64_t>(kAdpcmFrameBytes) * frames;
 }
 
 // Decodes `count` ADPCM samples of a voice that doesn't loop in this chunk. Clears the samples past the end of the wave
 // and stops the voice there.
 void SbnPlayer::DecodeAdpcm(AudioList& list, Voice& voice, const Wave& wave, int32_t count, int& out)
 {
-    const int32_t wave_length = static_cast<int32_t>(wave.length / kFrameBytes * kFrameBytes);
-    const int32_t left = voice.last_sample != 0 ? kFrameSamples - voice.last_sample : 0;
+    const int32_t wave_length = static_cast<int32_t>(wave.length / kAdpcmFrameBytes * kAdpcmFrameBytes);
+    const int32_t left = voice.last_sample != 0 ? kAdpcmFrameSamples - voice.last_sample : 0;
     const int32_t tsam = std::max(count - left, 0);
-    const int32_t frames = (tsam + kFrameSamples - 1) >> 4;
-    int32_t bytes = frames * kFrameBytes;
+    const int32_t frames = (tsam + kAdpcmFrameSamples - 1) >> 4;
+    int32_t bytes = frames * kAdpcmFrameBytes;
     const int32_t samples = frames << 4;
     const int64_t over = voice.memory_in + bytes - (static_cast<int64_t>(wave.data) + wave_length);
     int32_t overflow = 0;
@@ -659,24 +558,24 @@ void SbnPlayer::DecodeAdpcm(AudioList& list, Voice& voice, const Wave& wave, int
         voice.playing = false;
     }
 
-    int32_t over_samples = (overflow / kFrameBytes) << 4;
+    int32_t over_samples = (overflow / kAdpcmFrameBytes) << 4;
     over_samples = std::min(over_samples, samples + left);
     bytes -= overflow;
     bool decoded = false;
     if (over_samples - (over_samples & 0xF) < count)
     {
         decoded = true;
-        DecodeChunk(list, voice, wave, samples - over_samples, bytes, static_cast<int16_t>(out),
-                    voice.decoder_first ? kAudioFlagInit : 0U);
-        out += voice.last_sample != 0 ? voice.last_sample << 1 : kFrameSamples << 1;
+        PushAdpcm(list, voice, samples - over_samples, bytes, static_cast<int16_t>(out),
+                  voice.decoder_first ? kAudioFlagInit : 0U);
+        out += voice.last_sample != 0 ? voice.last_sample << 1 : kAdpcmFrameSamples << 1;
         voice.last_sample = (count + voice.last_sample) & 0xF;
         voice.sample += count;
-        voice.memory_in += static_cast<int64_t>(kFrameBytes) * frames;
+        voice.memory_in += static_cast<int64_t>(kAdpcmFrameBytes) * frames;
     }
     else
     {
         voice.last_sample = 0;
-        voice.memory_in += static_cast<int64_t>(kFrameBytes) * frames;
+        voice.memory_in += static_cast<int64_t>(kAdpcmFrameBytes) * frames;
     }
 
     if (over_samples != 0)
@@ -696,7 +595,7 @@ void SbnPlayer::LoadPcmLoop(AudioList& list, Voice& voice, const Wave& wave, int
     uint32_t align = 0;
     if (samples > 0)
     {
-        align = LoadAligned(list, voice.memory_in, samples << 1, out);
+        align = PushAlignedLoad(list, voice.memory_in, samples << 1, static_cast<uint32_t>(out));
     }
 
     out += static_cast<int>(align);
@@ -714,7 +613,8 @@ void SbnPlayer::LoadPcmLoop(AudioList& list, Voice& voice, const Wave& wave, int
 
         samples = std::min<int32_t>(count, static_cast<int32_t>(voice.loop_end_sample - voice.loop_start_sample));
         const int dmem_align = (place & 7) != 0 ? 8 - (place & 7) : 0;
-        const uint32_t ram_align = LoadAligned(list, voice.memory_in, samples << 1, place + dmem_align);
+        const uint32_t ram_align =
+            PushAlignedLoad(list, voice.memory_in, samples << 1, static_cast<uint32_t>(place + dmem_align));
         if (ram_align != 0 || dmem_align != 0)
         {
             list.commands.push_back(
@@ -746,7 +646,7 @@ void SbnPlayer::LoadPcm(AudioList& list, Voice& voice, const Wave& wave, int32_t
         if (count > 0)
         {
             bytes -= overflow;
-            out += static_cast<int>(LoadAligned(list, voice.memory_in, bytes, out));
+            out += static_cast<int>(PushAlignedLoad(list, voice.memory_in, bytes, static_cast<uint32_t>(out)));
         }
 
         voice.sample += count;
@@ -768,56 +668,21 @@ void SbnPlayer::LoadPcm(AudioList& list, Voice& voice, const Wave& wave, int32_t
 // changed.
 void SbnPlayer::MixVoice(AudioList& list, Voice& voice)
 {
-    if (voice.mixer_dirty)
+    const bool refresh = voice.mixer_dirty;
+    if (refresh)
     {
-        constexpr uint32_t kSetTargetLeft = 0x09000000;
-        constexpr uint32_t kSetCurrentLeft = 0x09060000;
-        constexpr uint32_t kSetTargetRight = 0x09040000;
-        constexpr uint32_t kEnvMixerInit = 0x03010000;
-        const auto pair = [](int16_t high, uint16_t low)
-        {
-            return (static_cast<uint32_t>(static_cast<uint16_t>(high)) << 16) | low;
-        };
-
         voice.mixer_dirty = false;
         const std::size_t left = config_.stereo ? voice.mixer_pan : 64;
         const std::size_t right = config_.stereo ? 127U - voice.mixer_pan : 64;
-        voice.target_left = static_cast<int16_t>((voice.mixer_volume * kEqualPower[left]) >> 15);
-        voice.target_right = static_cast<int16_t>((voice.mixer_volume * kEqualPower[right]) >> 15);
-        voice.rate_high_left = Rate(voice.current_left, voice.target_left, voice.segment_end, voice.rate_low_left);
-        voice.rate_high_right = Rate(voice.current_right, voice.target_right, voice.segment_end, voice.rate_low_right);
-        list.commands.push_back({kSetTargetLeft | static_cast<uint16_t>(voice.target_left),
-                                 pair(voice.rate_high_left, voice.rate_low_left)});
-        list.commands.push_back({kSetCurrentLeft | static_cast<uint16_t>(voice.current_left),
-                                 pair(voice.dry, static_cast<uint16_t>(voice.wet))});
-        list.commands.push_back({kSetTargetRight | static_cast<uint16_t>(voice.target_right),
-                                 pair(voice.rate_high_right, voice.rate_low_right)});
-        list.commands.push_back({kEnvMixerInit | static_cast<uint16_t>(voice.current_right), voice.mixer_state});
+        voice.target_left = SideLevel(voice.mixer_volume, left);
+        voice.target_right = SideLevel(voice.mixer_volume, right);
+        voice.rate_high_left = Rate(static_cast<double>(voice.current_left), static_cast<double>(voice.target_left),
+                                    voice.segment_end, voice.rate_low_left, true);
+        voice.rate_high_right = Rate(static_cast<double>(voice.current_right), static_cast<double>(voice.target_right),
+                                     voice.segment_end, voice.rate_low_right, true);
     }
-    else
-    {
-        list.EnvMixer(0, voice.mixer_state);
-    }
-}
 
-void SbnPlayer::LoadDelayLine(AudioList& list, const Effect& effect, int64_t position, int buffer, int count)
-{
-    const int64_t end = position + count;
-    const auto address = static_cast<uint32_t>(effect.base + position * 2);
-    if (end > effect.length)
-    {
-        const auto before = static_cast<uint32_t>(effect.length - position) << 1;
-        const auto after = static_cast<uint32_t>(end - effect.length) << 1;
-        list.commands.push_back({kOpLoad | ((before & kDmemMask) << 12) | static_cast<uint32_t>(buffer), address});
-        list.commands.push_back(
-            {kOpLoad | ((after & kDmemMask) << 12) | (static_cast<uint32_t>(buffer) + before), effect.base});
-    }
-    else
-    {
-        list.commands.push_back(
-            {kOpLoad | ((static_cast<uint32_t>(count << 1) & kDmemMask) << 12) | static_cast<uint32_t>(buffer),
-             address});
-    }
+    PushEnvMixer(list, voice, refresh);
 }
 
 void SbnPlayer::PullEffect(AudioList& list, Effect& effect, int16_t wet)
@@ -875,26 +740,21 @@ void SbnPlayer::PullEffect(AudioList& list, Effect& effect, int16_t wet)
         if (delay.feed_forward != 0)
         {
             mix(delay.feed_forward, input_buffer, output_buffer);
-            if (!delay.has_resampler && !delay.has_filter)
+            if (!delay.has_resampler && !delay.has_low_pass)
             {
                 save(output_buffer, place_of(out_place));
             }
         }
 
-        if (delay.feed_back != 0)
+        if (delay.feedback != 0)
         {
-            mix(delay.feed_back, output_buffer, input_buffer);
+            mix(delay.feedback, output_buffer, input_buffer);
             save(input_buffer, place_of(in_place));
         }
 
-        if (delay.has_filter)
+        if (delay.has_low_pass)
         {
-            list.LoadAdpcm(32, delay.filter.coefficients_address);
-            list.commands.push_back(
-                {static_cast<uint32_t>(kAudioPoleFilter) << 24 | (delay.filter.first ? 1U << 16 : 0U) |
-                     static_cast<uint16_t>(delay.filter.gain),
-                 ((static_cast<uint32_t>(output_buffer) >> 8) << 24) | (delay.filter.state & kAddressMask)});
-            delay.filter.first = false;
+            PushLowPass(list, delay.low_pass, output_buffer);
         }
 
         if (!delay.has_resampler)
@@ -922,40 +782,16 @@ void SbnPlayer::PullEffect(AudioList& list, Effect& effect, int16_t wet)
 void SbnPlayer::ResampleDelay(AudioList& list, const Effect& effect, Delay& delay, int output_buffer)
 {
     const int resample_buffer = kTemp + kChunkBytes * 2;
-    const auto length = static_cast<int32_t>(delay.output - delay.input);
-    delay.mod_value += delay.mod_increment * static_cast<float>(kChunk);
-    if (static_cast<double>(delay.mod_value) > 2.0)
-    {
-        delay.mod_value = static_cast<float>(static_cast<double>(delay.mod_value) - 4.0);
-    }
-
-    float shape = delay.mod_value;
-    if (shape < 0.0F)
-    {
-        shape = -shape;
-    }
-
-    shape = static_cast<float>(static_cast<double>(shape) - 1.0);
-    float delta = delay.mod_gain * shape;
-    delta /= static_cast<float>(length);
-    delta = static_cast<float>(static_cast<int32_t>(delta * kUnityPitch));
-    delta = delta / kUnityPitch;
-    const auto ratio = static_cast<float>(1.0 - static_cast<double>(delta));
-    const float exact = delay.resampler_delta + ratio * static_cast<float>(kChunk);
-    const auto samples = static_cast<int32_t>(exact);
-    delay.resampler_delta = exact - static_cast<float>(samples);
+    const compact_synthesis::ChorusStep step = compact_synthesis::StepChorus(delay, kChunk);
     int64_t resample_place = effect.input - (static_cast<int64_t>(delay.output) - delay.mod_delta);
     const int align = static_cast<int>((effect.base + resample_place * 2) & 7) >> 1;
     resample_place = WrapDelayPlace(resample_place - align, effect.length);
-    LoadDelayLine(list, effect, resample_place, resample_buffer, samples + align);
-    const auto increment = static_cast<int32_t>(ratio * kUnityPitch);
-    list.commands.push_back({static_cast<uint32_t>(kAudioResample) << 24 | (delay.resampler_state & kAddressMask),
-                             (delay.resampler_first ? 1U << 30 : 0U) |
-                                 ((static_cast<uint32_t>(increment) & 0xFFFF) << 14) |
-                                 ((static_cast<uint32_t>((align << 1) + resample_buffer) & kDmemMask) << 2) |
-                                 ((static_cast<uint32_t>(output_buffer) >> 8) & 3)});
-    delay.resampler_first = false;
-    delay.mod_delta += samples - kChunk;
+    PushDelayLoad(list, effect.base, static_cast<uint32_t>(effect.length), resample_place, resample_buffer,
+                  step.samples + align);
+    PushResample(list, delay.resampler_state, delay.resampler_first, step.ratio,
+                 static_cast<uint32_t>((align << 1) + resample_buffer),
+                 (static_cast<uint32_t>(output_buffer) >> 8) & 3);
+    delay.mod_delta += step.samples - kChunk;
 }
 
 } // namespace ultralib::n64

@@ -98,11 +98,11 @@ inline constexpr uint32_t kFcr31WriteMask = 0x0183FFFF;
 // FCR31's condition bit. The compares set it, and BC1 tests it.
 inline constexpr uint32_t kFcr31Condition = 1u << 23;
 
-// One of the 32 TLB entries, as TLBWI and TLBWR write it.
+// One of the 32 TLB entries in the form that TLBWI and TLBWR write.
 struct TlbEntry
 {
     uint32_t page_mask = 0;
-    uint64_t entry_hi = 0; // R, VPN2 and ASID, as in EntryHi.
+    uint64_t entry_hi = 0; // R, VPN2 and ASID in the layout of EntryHi.
     uint32_t entry_lo0 = 0;
     uint32_t entry_lo1 = 0;
     bool global = false;
@@ -135,7 +135,9 @@ public:
 
     explicit Cpu(System& system);
 
-    // Puts the CPU in its power-on state, as the hardware's cold reset leaves it.
+    // Puts the CPU in the state that the PIF's boot code leaves for IPL3: COP0 and COP1 usable, FR set, the values that
+    // a console reads after power-on in BadVAddr, EPC, ErrorEPC, Context, XContext and Cause, and the TLB cleared to
+    // pages of kseg0.
     void Reset();
 
     // Runs instructions until the system's clock reaches `until`, or until the system asks the CPU to stop. Without
@@ -331,7 +333,10 @@ private:
         uint8_t rs = 0;
         uint8_t rt = 0;
         uint8_t rd = 0;
-        int32_t immediate = 0; // Sign- or zero-extended as the instruction requires, or a shift's amount.
+
+        // Sign- or zero-extended as the instruction requires, or the shift amount. A branch has its offset in bytes, J
+        // and JAL the target's low 28 bits, and LUI the value shifted into the upper half.
+        int32_t immediate = 0;
 
         // For a branch: the loop that it ends isn't a wait. WaitLoopRegisters rejected the loop, or the loop's
         // registers kept changing from pass to pass.
@@ -447,8 +452,8 @@ private:
 
     TlbResult LookupTlb(uint64_t vaddr, bool write, uint32_t& paddr) const;
 
-    // The legacy timing's short path (cpu_fast.cpp). Runs instructions until one of them needs Step, or until a check
-    // point ends the run of a page. Returns false if Step must run the next instruction.
+    // The legacy timing's short path (cpu_fast.cpp). Runs instructions until one of them requires Step, or until a
+    // check point ends the run of a page. Returns false if Step must run the next instruction.
     bool RunFast(uint64_t until);
 
     static FastInstruction DecodeFast(uint32_t instruction);
@@ -577,7 +582,7 @@ private:
     uint64_t random_epoch_ = 0; // The instruction count at which Random last held 31.
     bool ll_bit_ = false;
     std::array<TlbEntry, 32> tlb_{};
-    bool tlb_pages_ = false; // Translate through the tables, as the legacy players do.
+    bool tlb_pages_ = false; // Translate through the tables the way the legacy players do.
     uint64_t refused_board_pages_ = 0;
     PageTable read_pages_;
     PageTable write_pages_;

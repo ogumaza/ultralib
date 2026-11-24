@@ -70,8 +70,8 @@ uint32_t System::MiRepeatLength() const
 }
 
 // The RDRAM chips' registers. Bit 19 of the address broadcasts a write to every chip. Bits 10 to 18 select a chip by
-// its device ID. A chip that isn't enabled yet answers only when it's the first such chip, which lets IPL3 give each
-// chip its ID in turn.
+// its device ID. A chip that isn't enabled yet answers only when it's the first such chip. IPL3 then gives each chip
+// its ID in turn.
 
 System::RdramChip* System::SelectRdramChip(uint32_t select)
 {
@@ -369,7 +369,7 @@ uint32_t System::ReadMappedRdram32(uint32_t paddr)
         return 0;
     }
 
-    // A fixed xorshift sequence decides which bits survive, so that every run gives the same result.
+    // A fixed xorshift sequence decides which bits survive. Every run then gives the same result.
     const uint32_t chance = (chip->current - kRdramCurrentLow) * 256 / (kRdramCurrentHigh - kRdramCurrentLow);
     uint32_t result = 0;
     for (int bit = 0; bit < 32; bit++)

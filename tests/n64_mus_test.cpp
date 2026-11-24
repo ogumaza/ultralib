@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -15,6 +14,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/al_synth.h"
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
@@ -26,20 +26,8 @@ namespace
 {
 
 namespace n64 = ultralib::n64;
-using Bytes = std::vector<uint8_t>;
-
-void Put32(Bytes& bytes, uint32_t value)
-{
-    bytes.push_back(static_cast<uint8_t>(value >> 24));
-    bytes.push_back(static_cast<uint8_t>(value >> 16));
-    bytes.push_back(static_cast<uint8_t>(value >> 8));
-    bytes.push_back(static_cast<uint8_t>(value));
-}
-
-void PutAt(Bytes& bytes, std::size_t place, uint32_t value)
-{
-    xsflib::StoreBe32(bytes.data() + place, value);
-}
+using ultralib::testing::Bytes;
+using ultralib::testing::PutAt;
 
 // A bank of two waves. The first has a loop and detunes by +50 cents with a base note of 60. The second has neither,
 // and its base note is 48.
@@ -107,15 +95,15 @@ Bytes MakeSong(const Bytes& list)
 {
     constexpr uint32_t kHeader = 0x18;
     Bytes bytes;
-    Put32(bytes, 1);
-    Put32(bytes, kHeader);
-    Put32(bytes, kHeader + 4);
-    Put32(bytes, kHeader + 8);
-    Put32(bytes, 0);
-    Put32(bytes, 0);
-    Put32(bytes, kHeader + 12);
-    Put32(bytes, 0);
-    Put32(bytes, 0);
+    xsflib::AppendBe32(bytes, 1);
+    xsflib::AppendBe32(bytes, kHeader);
+    xsflib::AppendBe32(bytes, kHeader + 4);
+    xsflib::AppendBe32(bytes, kHeader + 8);
+    xsflib::AppendBe32(bytes, 0);
+    xsflib::AppendBe32(bytes, 0);
+    xsflib::AppendBe32(bytes, kHeader + 12);
+    xsflib::AppendBe32(bytes, 0);
+    xsflib::AppendBe32(bytes, 0);
     bytes.insert(bytes.end(), list.begin(), list.end());
 
     return bytes;
@@ -331,7 +319,7 @@ void TestLateRestVelocity()
 
 void TestLatePitchBeforeVolume()
 {
-    // Wave 0 with note 0 is 12.5 semitones up, past the synthesizer's octave, so the player silences it by its
+    // Wave 0 with note 0 is 12.5 semitones up, past the synthesizer's octave. The player silences it by its
     // velocity. Mario Tennis's build sends the pitch first, at 0x802F0A60: the voice's first volume is already 0.
     // Puzzle League's sends the volume first.
     const auto first_target = [](const n64::MusLatePlayerConfig& config)

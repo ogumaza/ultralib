@@ -15,7 +15,7 @@ namespace ultralib::machine
 
 class System;
 
-// The SP registers, as the save state holds them.
+// The SP registers in the layout of the save state.
 struct SpRegisters
 {
     uint32_t mem_address = 0;
@@ -62,7 +62,7 @@ public:
     const SpMemory& Dmem() const;
     const SpMemory& Imem() const;
 
-    // DMEM or IMEM, as bit 12 of an SP memory address selects.
+    // The DMEM or IMEM that bit 12 of an SP memory address selects.
     SpMemory& Memory(uint32_t address)
     {
         return (address & kImemBit) != 0 ? imem_ : dmem_;
@@ -73,7 +73,7 @@ public:
         return (address & kImemBit) != 0 ? imem_ : dmem_;
     }
 
-    // The registers at 0x04040000 by word index, as the CPU reads and writes them.
+    // The CPU's access to the registers at 0x04040000. `index` counts words.
     uint32_t ReadRegister(uint32_t index);
     void WriteRegister(uint32_t index, uint32_t value);
 
@@ -85,7 +85,7 @@ public:
 
     uint32_t Status() const;
 
-    // Sets SP_STATUS bits directly, as a task that the core completes without running sets them.
+    // Sets SP_STATUS bits directly. A task that the core completes without running sets them this way.
     void SetStatusBits(uint32_t bits);
 
     // The DMA engine. The system calls FinishDma when a transfer's time is up.
@@ -157,7 +157,7 @@ private:
     };
 
     // An instruction with its fields taken apart. The table holds one for each word of IMEM. An entry counts only while
-    // `word` equals the word in IMEM, so no write to IMEM has to tell the table. The default entry is a NOP, the
+    // `word` equals the word in IMEM. A write to IMEM therefore leaves the table alone. The default entry is a NOP, the
     // decoded form of a word of zeros.
     struct Decoded
     {
@@ -168,7 +168,7 @@ private:
         uint8_t rd = 0;
         uint8_t sa = 0;
 
-        // Sign- or zero-extended as the instruction needs. A branch's holds its offset in bytes.
+        // Sign- or zero-extended as the instruction requires. A branch has its offset in bytes.
         uint32_t immediate = 0;
 
         VectorUnit::Operation vector = nullptr;
@@ -227,8 +227,8 @@ private:
     uint32_t Read32(uint32_t address) const;
     void Write32(uint32_t address, uint32_t value);
 
-    // Moves bytes `first` up to `end` of a register from or to DMEM at `address`, which wraps. The register's index
-    // wraps too.
+    // Moves bytes `first` up to `end` of a register from or to DMEM at `address`. Both the address in DMEM and the
+    // register's index wrap.
     void LoadBytes(int vt, int first, int end, uint32_t address);
     void StoreBytes(int vt, int first, int end, uint32_t address);
 

@@ -10,8 +10,8 @@
 // - The voices take their envelopes, vibratos and portamentos.
 // - The engine appends the commands for that update's samples: each voice's ADPCM, its resampling and its mix.
 //
-// The model holds its state in plain values and indices. The sound files stay outside it. A copy of the object is a
-// snapshot while the files live. A script may write to its sequence. Each player therefore holds a copy of the
+// The model keeps its state in plain values and indices. The sound files stay outside it. A copy of the object is a
+// snapshot while the files live. A script may write to its sequence. Each player therefore keeps a copy of the
 // sequence's bytes.
 //
 // A note's start reaches `on_note`, with the place of its command in the sequence.
@@ -19,7 +19,6 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -30,6 +29,7 @@
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
 #include "ultralib/n64/ead_bank.h"
+#include "ultralib/n64/ead_list_kind.h"
 #include "ultralib/n64/seq_file.h"
 
 namespace ultralib::n64
@@ -95,8 +95,8 @@ public:
     static constexpr int kChannelsPerPlayer = 16;
     static constexpr int kLayersPerChannel = 4;
 
-    // The files must outlive the player and its copies. The model takes its buffers from `memory`. `memory` holds the
-    // image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
+    // The files must outlive the player and its copies. The model allocates its buffers in `memory`. `memory` contains
+    // the image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
     EadEarlyPlayer(const EadEarlyConfig& config, const EadEarlyFiles& files, AudioMemory& memory);
 
     // Starts a sequence on a player.
@@ -111,7 +111,8 @@ public:
     void SetFadeVolume(int player, float volume);
     void FadeTo(int player, float volume, int updates);
 
-    // A script's input from the game. Each channel has 8 ports. A script reads -1 from a port that holds nothing new.
+    // A script's input from the game. Each channel has 8 ports. A script reads -1 from a port that contains nothing
+    // new.
     void WritePort(int player, int channel, int port, int8_t value);
 
     // The sequence's value for its variation commands, from the game.
@@ -140,7 +141,7 @@ private:
         uint8_t depth = 0;
     };
 
-    // An envelope lies in a bank, or in a sequence's bytes.
+    // An envelope is in a bank, or in a sequence's bytes.
     struct EnvelopeRef
     {
         const EadEnvelope* bank = nullptr;
@@ -355,13 +356,8 @@ private:
         VoiceBuffers buffers;
     };
 
-    enum ListKind : uint8_t
-    {
-        kDisabled = 0,
-        kDecaying = 1,
-        kReleasing = 2,
-        kActive = 3,
-    };
+    using ListKind = EadListKind;
+    using enum EadListKind;
 
     // Lists of voices: a voice's index or a list's head.
     int Head(int pool, ListKind kind) const;

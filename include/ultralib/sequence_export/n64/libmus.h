@@ -4,20 +4,20 @@
 // its samples in a pair of files: a table of waves that starts with "N64 PtrTables" and the samples themselves.
 //
 // A song has channels that each play one note at a time, and in the library's later form a master track. Each channel
-// reads a list of commands and notes. A note holds a wave, an envelope, a pan and a velocity, and a new note on a
-// channel cuts the one before. Separate lists give the channel's volume and pitch for each tick. The player's
-// arithmetic:
+// reads a list of commands and notes. A note holds a wave, an envelope, a pan and a velocity. In the later form, a new
+// note on a channel cuts the one before. In the early form, the note before starts its release. Separate lists give
+// the channel's volume and pitch for each tick. The player's arithmetic:
 //
-// - A tick lasts 256 / tempo callbacks of the player. A script's tempo of b gives a tempo of b * 256 * 96 / 120 / 60,
-// in
-//   whole numbers. 120 stands for about 96 ticks a second. The callbacks come every 16666 microseconds, rounded to
-//   whole samples of the output: 367 samples at a rate of 22047, or 60.07 a second.
+// - A tick lasts 256 / tempo callbacks of the player. A script's tempo of b gives a tempo of
+//   b * 256 * 96 / 120 / 60, in whole numbers. 120 stands for about 96 ticks a second. The callbacks come every 16666
+//   microseconds, rounded to whole samples of the output: 367 samples at a rate of 22047, or 60.07 a second.
 // - A note at key n plays a wave at 2^((n + detune) / 12) of the output rate. Above 2, the note is silent.
-// - An envelope moves in straight lines between bytes: from the first value to the peak, on to the sustain, and from
-//   wherever it stands to nothing in a fixed time. Its times count ticks.
-// - A voice's volume is min(32767, (volume * envelope * velocity * song volume) >> 13) * master >> 15. The mixer
-// squares
-//   it. Velocity and CC7 act squared in SoundFont and SFZ too.
+// - An envelope moves in straight lines between bytes: from the first value (0 in the early form) to the peak, on to
+//   the sustain, and from wherever it stands to nothing in a fixed time. Its times count ticks. In the later form, they
+//   count units of n ticks, where n is the envelope's first byte.
+// - A voice's volume is min(32767, (volume * envelope * velocity * song volume) >> 13) * master >> 15. The early form
+//   takes the master before the cap at 32767. The mixer squares the volume. Velocity and CC7 act squared in SoundFont
+//   and SFZ too.
 
 #pragma once
 
@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "ntdlib/sequence_export/frame.h"
+
 #include "ultralib/sequence_export/n64/games.h"
 #include "ultralib/sequence_export/n64/instruments.h"
 
@@ -45,7 +46,7 @@ struct LibmusSettings
     uint32_t output_rate = 22050;
 
     // The song's form, the player, the rule for a voice at the top of its volume and the passes that the main loop
-    // follows, as LibmusProfile describes them.
+    // follows. LibmusProfile describes them.
     bool early_form = false;
     bool early_player = false;
     bool clipped_envelopes = false;
@@ -59,7 +60,7 @@ struct LibmusSettings
     int reverb_base = 0;
 };
 
-// A wave and an envelope, which a preset plays. The envelope holds a song's seven bytes: its time unit in ticks, the
+// A wave and an envelope that a preset plays. The envelope holds a song's seven bytes: its time unit in ticks, the
 // first value, the attack's units, the peak, the decay's units, the sustain and the release's units. In a song with
 // clipped envelopes, `top` is the envelope's value at which the note's voice reaches the top of its volume, in 256ths
 // of the envelope's steps. The envelope plays every higher value as `top`. A `top` of 0 leaves the envelope whole.
@@ -97,11 +98,20 @@ std::vector<uint8_t> UnpackDirectoryFile(std::span<const uint8_t> file);
 class LibmusGame
 {
 public:
-    // Reads the game's songs and banks from `image`, which stays valid while the game lives.
+    // Reads the game's songs and banks from `image`. The image must stay valid while the game is in use.
     static std::unique_ptr<LibmusGame> Open(std::span<const uint8_t> image, const LibmusProfile& profile);
 
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
     Conversion Convert(std::size_t index, const PerformOptions& options);
+
+    // The count of the game's songs, and the file of song `number`, unpacked. A number that names no song has an empty
+    // file.
+    std::size_t SongCount() const;
+    std::span<const uint8_t> SongFile(std::size_t number) const;
+
+    // The bank of song `number`: its table of waves, unpacked, and the place of its samples in the image.
+    std::span<const uint8_t> WaveTable(std::size_t number) const;
+    std::size_t SamplePlace(std::size_t number) const;
 
 private:
     struct BankWave
@@ -126,9 +136,10 @@ private:
 
     LibmusGame() = default;
 
-    std::string NameOf(std::size_t index, const char* beside = nullptr) const;
+    std::string NameOf(std::size_t index, const std::string& settings = {}) const;
     bool Repeats(std::size_t later, std::size_t earlier);
     Bank& BankOfSong(std::size_t index);
+    const Bank& BankOfSong(std::size_t index) const;
     std::shared_ptr<const Wave> WaveAt(Bank& bank, int32_t index) const;
 
     std::span<const uint8_t> image_;

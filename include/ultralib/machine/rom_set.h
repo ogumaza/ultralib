@@ -51,4 +51,8 @@ struct Aleck64SetImage
 Aleck64SetImage ReadAleck64Set(const std::filesystem::path& path, std::string_view program,
                                std::span<const Aleck64Set> games = Aleck64Sets());
 
+// The names in `games` of the other games whose chips `image` holds, joined with ", ". `games` is the list that read
+// the set.
+std::string OtherGameNames(const Aleck64SetImage& image, std::span<const Aleck64Set> games = Aleck64Sets());
+
 } // namespace ultralib::machine

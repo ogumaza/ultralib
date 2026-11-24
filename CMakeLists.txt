@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(ultralib VERSION 1.0.0 LANGUAGES C CXX)
+project(ultralib VERSION 2.0.0 LANGUAGES C CXX)
 
 # CMake 3.20 has no PROJECT_IS_TOP_LEVEL. ultralib is the top-level project when the build starts in its folder.
 if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
@@ -34,7 +34,7 @@ if (NOT TARGET xsflib::common)
         set(XSFLIB_INSTALL ${ULTRALIB_INSTALL})
         add_subdirectory(externals/ntdlib/externals/xsflib)
     else()
-        find_package(xsflib 1.10 REQUIRED)
+        find_package(xsflib 1.12 REQUIRED)
     endif()
 endif()
 if (ULTRALIB_SOUND AND NOT TARGET ntdlib::common)
@@ -43,14 +43,14 @@ if (ULTRALIB_SOUND AND NOT TARGET ntdlib::common)
         set(NTDLIB_INSTALL ${ULTRALIB_INSTALL})
         add_subdirectory(externals/ntdlib)
     else()
-        find_package(ntdlib 4.0 REQUIRED)
+        find_package(ntdlib 7.0 REQUIRED)
     endif()
 endif()
 
 # seqlib, for the MIDI writers of the sound modules and for the conversions. A build of ultralib alone takes the copy
 # that xsflib adds from its submodule, or finds an installed seqlib.
 if (ULTRALIB_SOUND AND NOT TARGET seqlib::seqlib)
-    find_package(seqlib 1.4 REQUIRED)
+    find_package(seqlib 1.5 REQUIRED)
 endif()
 
 if (ULTRALIB_TESTS)
@@ -70,9 +70,10 @@ set_property(GLOBAL APPEND PROPERTY ULTRALIB_INSTALLED_TARGETS ultralib_testing)
 # The emulator core: the VR4300, the RSP, the RCP's interfaces, the PIF, boot, save states and coverage.
 xsflib_add_project_library(ultralib machine src/machine/aleck64.cpp src/machine/boot.cpp src/machine/coverage.cpp
                            src/machine/cpu.cpp src/machine/cpu_cop0.cpp src/machine/cpu_fast.cpp
-                           src/machine/cpu_fpu.cpp src/machine/pif.cpp src/machine/rcp.cpp src/machine/rdram.cpp
-                           src/machine/rsp.cpp src/machine/rsp_vector.cpp src/machine/save_state.cpp
-                           src/machine/system.cpp src/machine/word_set.cpp)
+                           src/machine/cpu_fpu.cpp src/machine/cpu_run.cpp src/machine/pif.cpp src/machine/rcp.cpp
+                           src/machine/rcp_pi_si.cpp src/machine/rdram.cpp src/machine/rsp.cpp
+                           src/machine/rsp_registers.cpp src/machine/rsp_vector.cpp src/machine/save_state.cpp
+                           src/machine/system.cpp src/machine/system_bus.cpp src/machine/word_set.cpp)
 target_link_libraries(ultralib_machine PUBLIC xsflib::common)
 
 # The FPU's arithmetic runs on the host's floating point in the rounding mode that the emulated FCR31 selects, and
@@ -93,7 +94,7 @@ xsflib_add_project_test(ultralib pif ultralib::machine)
 xsflib_add_project_test(ultralib aleck64 ultralib::machine)
 
 # The ROM sets of Seta's Aleck64 board: each game's chips, and the reading of a set into a cartridge's image. They read
-# the sets through xsflib::rom_set, which xsflib builds only with zlib.
+# the sets through xsflib::rom_set. xsflib builds that only with zlib.
 if (TARGET xsflib::rom_set)
     xsflib_add_project_library(ultralib rom_set src/machine/rom_set.cpp)
     target_link_libraries(ultralib_rom_set PUBLIC xsflib::rom_set)
@@ -128,30 +129,33 @@ if (ULTRALIB_SOUND)
     # samples and of the banks of Nintendo EAD's sound engines, and the reader of those engines' sequences. The library
     # also contains the models of the games' sound engines and of the audio microcodes, and a player of those models for
     # a host.
-    xsflib_add_project_library(ultralib n64 src/n64/al_player.cpp src/n64/al_player_sequences.cpp src/n64/al_synth.cpp
-                               src/n64/al_synth_compact.cpp src/n64/al_synth_standard.cpp
-                               src/n64/ambrella_player.cpp src/n64/audio_rsp.cpp src/n64/audio_rsp_compact.cpp
-                               src/n64/audio_rsp_ead.cpp src/n64/bank_file.cpp src/n64/ead_bank.cpp
-                               src/n64/ead_early.cpp src/n64/ead_early_scripts.cpp src/n64/ead_early_synthesis.cpp
-                               src/n64/ead_early_voices.cpp src/n64/ead_later.cpp src/n64/ead_later_layers.cpp
-                               src/n64/ead_later_scripts.cpp src/n64/ead_later_synthesis.cpp
-                               src/n64/ead_later_tables.cpp src/n64/ead_later_voices.cpp src/n64/ead_middle.cpp
-                               src/n64/ead_middle_scripts.cpp src/n64/ead_middle_synthesis.cpp
+    xsflib_add_project_library(ultralib n64 src/n64/al_player.cpp src/n64/al_player_midi.cpp
+                               src/n64/al_player_sequences.cpp src/n64/al_player_voices.cpp src/n64/al_synth.cpp
+                               src/n64/al_synth_compact.cpp src/n64/al_synth_standard.cpp src/n64/ambrella_player.cpp
+                               src/n64/ambrella_player_reader.cpp src/n64/audio_rsp.cpp src/n64/audio_rsp_compact.cpp
+                               src/n64/audio_rsp_ead.cpp src/n64/bank_file.cpp src/n64/compact_synthesis.cpp
+                               src/n64/ead_bank.cpp src/n64/ead_early.cpp src/n64/ead_early_scripts.cpp
+                               src/n64/ead_early_synthesis.cpp src/n64/ead_early_voices.cpp src/n64/ead_later.cpp
+                               src/n64/ead_later_layers.cpp src/n64/ead_later_reverb.cpp src/n64/ead_later_scripts.cpp
+                               src/n64/ead_later_synthesis.cpp src/n64/ead_later_tables.cpp src/n64/ead_later_voices.cpp
+                               src/n64/ead_middle.cpp src/n64/ead_middle_scripts.cpp src/n64/ead_middle_synthesis.cpp
                                src/n64/ead_middle_voices.cpp src/n64/ead_script.cpp src/n64/ead_tables.cpp
                                src/n64/enhanced_mix.cpp src/n64/enhanced_mix_ops.cpp src/n64/frame_player.cpp
-                               src/n64/midi.cpp src/n64/mus_late_player.cpp src/n64/mus_player.cpp
+                               src/n64/midi.cpp src/n64/mus_files.cpp src/n64/mus_late_player.cpp src/n64/mus_player.cpp
                                src/n64/rom_data.cpp src/n64/sbn.cpp src/n64/sbn_player.cpp
-                               src/n64/sbn_player_synthesis.cpp src/n64/seq_file.cpp src/n64/vadpcm.cpp)
+                               src/n64/sbn_player_synthesis.cpp src/n64/sbn_player_tracks.cpp
+                               src/n64/sbn_player_voices.cpp src/n64/seq_file.cpp src/n64/vadpcm.cpp)
     target_link_libraries(ultralib_n64 PUBLIC xsflib::common PRIVATE ntdlib::common ntdlib::wave seqlib::seqlib)
     set(ULTRALIB_N64_ROUNDING_SOURCES src/n64/al_synth.cpp src/n64/al_synth_compact.cpp src/n64/al_synth_standard.cpp
-                                    src/n64/ead_later.cpp src/n64/ead_later_layers.cpp src/n64/ead_later_scripts.cpp
-                                    src/n64/ead_later_synthesis.cpp src/n64/ead_later_voices.cpp
+                                    src/n64/compact_synthesis.cpp src/n64/ead_later.cpp src/n64/ead_later_layers.cpp
+                                    src/n64/ead_later_reverb.cpp src/n64/ead_later_scripts.cpp
+                                    src/n64/ead_later_synthesis.cpp src/n64/ead_later_voices.cpp src/n64/mus_files.cpp
                                     src/n64/mus_late_player.cpp src/n64/mus_player.cpp)
     ultralib_follow_rounding_mode(${ULTRALIB_N64_ROUNDING_SOURCES})
     xsflib_add_project_test(ultralib n64_formats ultralib::n64)
     xsflib_add_project_test(ultralib n64_ead ultralib::n64)
-    xsflib_add_project_test(ultralib n64_al_player ultralib::n64)
-    xsflib_add_project_test(ultralib n64_ambrella ultralib::n64)
+    xsflib_add_project_test(ultralib n64_al_player ultralib::n64 seqlib::seqlib)
+    xsflib_add_project_test(ultralib n64_ambrella ultralib::n64 seqlib::seqlib)
     xsflib_add_project_test(ultralib n64_enhanced ultralib::n64)
     xsflib_add_project_test(ultralib n64_mus ultralib::n64)
     xsflib_add_project_test(ultralib n64_audio ultralib::n64)
@@ -166,17 +170,32 @@ endif()
 if (ULTRALIB_SEQUENCE_EXPORT AND TARGET xsflib::rom_set)
     xsflib_add_project_library(ultralib sequence_export_n64
         src/sequence_export/n64/ead.cpp
+        src/sequence_export/n64/ead_game.cpp
+        src/sequence_export/n64/ead_zones.cpp
         src/sequence_export/n64/envelope.cpp
         src/sequence_export/n64/games.cpp
         src/sequence_export/n64/image.cpp
         src/sequence_export/n64/input.cpp
         src/sequence_export/n64/instruments.cpp
         src/sequence_export/n64/libmus.cpp
+        src/sequence_export/n64/libmus_game.cpp
+        src/sequence_export/n64/libmus_zone.cpp
         src/sequence_export/n64/libultra.cpp
+        src/sequence_export/n64/libultra_game.cpp
         src/sequence_export/n64/resampler_low_pass.cpp
-        src/sequence_export/n64/sbn.cpp)
+        src/sequence_export/n64/rsp_audio.cpp
+        src/sequence_export/n64/sbn.cpp
+        src/sequence_export/n64/sbn_game.cpp
+        src/sequence_export/n64/wave.cpp)
     target_link_libraries(ultralib_sequence_export_n64 PUBLIC ntdlib::sequence_export ultralib::n64 ultralib::rom_set)
+    # The conversion includes the private headers of the n64 module as "n64/<file>.h".
+    target_include_directories(ultralib_sequence_export_n64 PRIVATE ${PROJECT_SOURCE_DIR}/src)
     xsflib_add_project_test(ultralib sequence_export_n64 ultralib::sequence_export_n64)
+    xsflib_add_project_test(ultralib sequence_export_n64_ead ultralib::sequence_export_n64)
+    xsflib_add_project_test(ultralib sequence_export_n64_libmus ultralib::sequence_export_n64)
+    xsflib_add_project_test(ultralib sequence_export_n64_libultra ultralib::sequence_export_n64)
+    xsflib_add_project_test(ultralib sequence_export_n64_libultra_loops ultralib::sequence_export_n64)
+    xsflib_add_project_test(ultralib sequence_export_n64_sbn ultralib::sequence_export_n64)
 endif()
 
 if (ULTRALIB_TESTS)

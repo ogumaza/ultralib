@@ -37,8 +37,8 @@ bool Complete(const Aleck64Set& set, const std::map<ChipKey, std::size_t>& chips
     return !set.chips.empty() && std::ranges::all_of(set.chips, here);
 }
 
-// The image of `set`, whose chips are all among `files` at the indices that `chips` gives. Only the set's chips go to
-// xsflib's loader, which hashes each file that it's given.
+// The image of `set`. Each chip of the set is in `files`, at the index that `chips` gives. Only the set's chips go to
+// xsflib's loader. The loader hashes each file that it's given.
 std::vector<uint8_t> SetImage(const Aleck64Set& set, std::vector<SetFile>& files,
                               const std::map<ChipKey, std::size_t>& chips)
 {
@@ -177,6 +177,17 @@ Aleck64SetImage ReadAleck64Set(const std::filesystem::path& path, std::string_vi
     result.problem = xsflib::rip::BuildRomSetImage(loader_games, files).problem;
 
     return result;
+}
+
+std::string OtherGameNames(const Aleck64SetImage& image, std::span<const Aleck64Set> games)
+{
+    std::string names;
+    for (const std::size_t other : image.others)
+    {
+        names += (names.empty() ? "" : ", ") + std::string(games[other].name);
+    }
+
+    return names;
 }
 
 } // namespace ultralib::machine

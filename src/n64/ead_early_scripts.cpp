@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "ead_common.h"
+#include "ead_constants.h"
 #include "ead_early_constants.h"
 #include "ead_tables.h"
 #include "ultralib/n64/ead_early.h"
@@ -18,12 +20,12 @@ namespace ultralib::n64
 namespace
 {
 
-using ead_early_constants::kMuteStopNotes;
-using ead_early_constants::kMuteStopScript;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kMuteStopScript;
+using ead_constants::kTicksPerBeat;
 using ead_early_constants::kStateFadeIn;
 using ead_early_constants::kStateFadeOut;
 using ead_early_constants::kStateFadeStay;
-using ead_early_constants::kTatumsPerBeat;
 
 namespace tables = ead_tables;
 
@@ -36,7 +38,7 @@ constexpr uint8_t PortamentoMode(uint8_t mode)
 
 uint8_t EadEarlyPlayer::PeekByte(const Player& player, uint32_t place) const
 {
-    return place < player.bytes.size() ? player.bytes[place] : uint8_t{0};
+    return ead_common::PeekByte(player.bytes, place);
 }
 
 uint8_t EadEarlyPlayer::Read8(const Player& player, Script& script) const
@@ -46,22 +48,15 @@ uint8_t EadEarlyPlayer::Read8(const Player& player, Script& script) const
 
 uint16_t EadEarlyPlayer::Read16(const Player& player, Script& script) const
 {
-    const uint8_t high = Read8(player, script);
-    const uint8_t low = Read8(player, script);
+    const uint16_t value = ead_common::Peek16(player.bytes, script.pc);
+    script.pc += 2;
 
-    return static_cast<uint16_t>((high << 8) | low);
+    return value;
 }
 
 uint16_t EadEarlyPlayer::ReadVariable(const Player& player, Script& script) const
 {
-    uint16_t value = Read8(player, script);
-    if ((value & 0x80) != 0)
-    {
-        value = static_cast<uint16_t>((value << 8) & 0x7F00);
-        value = static_cast<uint16_t>(value | Read8(player, script));
-    }
-
-    return value;
+    return ead_common::ReadVariable(player.bytes, script.pc);
 }
 
 void EadEarlyPlayer::RunPlayer(int index)
@@ -98,14 +93,11 @@ void EadEarlyPlayer::RunPlayer(int index)
             const uint8_t command = Read8(player, script);
             if (command == 0xFF)
             {
-                if (script.depth == 0)
+                if (!ead_common::ReturnFromCall(script))
                 {
                     DisablePlayer(index);
                     break;
                 }
-
-                script.depth--;
-                script.pc = script.stack[script.depth & 3];
             }
 
             if (command == 0xFD)
@@ -122,77 +114,43 @@ void EadEarlyPlayer::RunPlayer(int index)
 
             if (command >= 0xC0)
             {
+                if (ead_common::RunFlowCommand(player.bytes, script, command, value, false))
+                {
+                    continue;
+                }
+
                 switch (command)
                 {
-                case 0xFC:
-                    {
-                        const uint16_t target = Read16(player, script);
-                        script.stack[script.depth & 3] = script.pc;
-                        script.depth++;
-                        script.pc = target;
-                        break;
-                    }
-                case 0xF8:
-                    script.loops[script.depth & 3] = Read8(player, script);
-                    script.stack[script.depth & 3] = script.pc;
-                    script.depth++;
-                    break;
-                case 0xF7:
-                    {
-                        uint8_t& loops = script.loops[(script.depth - 1) & 3];
-                        loops--;
-                        if (loops != 0)
-                        {
-                            script.pc = script.stack[(script.depth - 1) & 3];
-                        }
-                        else
-                        {
-                            script.depth--;
-                        }
-
-                        break;
-                    }
-                case 0xFB:
-                case 0xFA:
-                case 0xF9:
-                case 0xF5:
-                    {
-                        const uint16_t target = Read16(player, script);
-                        if ((command == 0xFA && value != 0) || (command == 0xF9 && value >= 0) ||
-                            (command == 0xF5 && value < 0))
-                        {
-                            break;
-                        }
-
-                        script.pc = target;
-                        break;
-                    }
                 case 0xF2:
                     ClearPool(PlayerPool(index));
                     FillPool(PlayerPool(index), Read8(player, script));
                     break;
+
                 case 0xF1:
                     ClearPool(PlayerPool(index));
                     break;
+
                 case 0xDF:
                     player.transpose = static_cast<int16_t>(static_cast<int8_t>(Read8(player, script)));
                     break;
+
                 case 0xDE:
                     player.transpose =
                         static_cast<int16_t>(player.transpose + static_cast<int8_t>(Read8(player, script)));
                     break;
+
                 case 0xDD:
                 case 0xDC:
                     {
                         const uint8_t amount = Read8(player, script);
                         if (command == 0xDD)
                         {
-                            player.tempo = static_cast<uint16_t>(amount * kTatumsPerBeat);
+                            player.tempo = static_cast<uint16_t>(amount * kTicksPerBeat);
                         }
                         else
                         {
                             player.tempo =
-                                static_cast<uint16_t>(player.tempo + static_cast<int8_t>(amount) * kTatumsPerBeat);
+                                static_cast<uint16_t>(player.tempo + static_cast<int8_t>(amount) * kTicksPerBeat);
                         }
 
                         if (player.tempo > tempo_limit_)
@@ -204,9 +162,9 @@ void EadEarlyPlayer::RunPlayer(int index)
                         {
                             player.tempo = 1;
                         }
-
                         break;
                     }
+
                 case 0xDB:
                     {
                         const float target = static_cast<float>(Read8(player, script)) / 127.0F;
@@ -222,56 +180,48 @@ void EadEarlyPlayer::RunPlayer(int index)
 
                             player.fade_volume = target;
                             break;
+
                         case 0:
                             player.fade_volume = target;
                             break;
+
                         case kStateFadeOut:
                         case kStateFadeStay:
                             player.volume = target;
                             break;
+
                         default:
                             break;
                         }
-
                         break;
                     }
+
                 case 0xDA:
                     player.fade_volume += static_cast<float>(static_cast<int8_t>(Read8(player, script))) / 127.0F;
                     break;
+
                 case 0xD7:
                     InitChannels(index, Read16(player, script));
                     break;
+
                 case 0xD6:
                     DisableChannels(index, Read16(player, script));
                     break;
-                case 0xD5:
-                    player.mute_scale = static_cast<float>(static_cast<int8_t>(Read8(player, script))) / 127.0F;
-                    break;
-                case 0xD4:
-                    player.muted = true;
-                    break;
-                case 0xD3:
-                    player.mute_behavior = Read8(player, script);
-                    break;
-                case 0xD2:
-                    player.short_velocities = Read16(player, script);
-                    break;
-                case 0xD1:
-                    player.short_gates = Read16(player, script);
-                    break;
-                case 0xD0:
-                    player.policy = Read8(player, script);
-                    break;
+
                 case 0xCC:
                     value = Read8(player, script);
                     break;
+
                 case 0xC9:
                     value = Read8(player, script) & value;
                     break;
+
                 case 0xC8:
                     value = value - Read8(player, script);
                     break;
+
                 default:
+                    ead_common::SetPlayerField(player, script, command);
                     break;
                 }
             }
@@ -287,21 +237,25 @@ void EadEarlyPlayer::RunPlayer(int index)
                         {
                             value = channels_[static_cast<std::size_t>(slot)].finished ? 1 : 0;
                         }
-
                         break;
                     }
+
                 case 0x50:
                     value -= player.variation;
                     break;
+
                 case 0x70:
                     player.variation = static_cast<int8_t>(value);
                     break;
+
                 case 0x80:
                     value = player.variation;
                     break;
+
                 case 0x90:
                     EnableChannel(index, low, Read16(player, script));
                     break;
+
                 default:
                     break;
                 }
@@ -366,14 +320,11 @@ void EadEarlyPlayer::RunChannel(int index)
             const uint8_t command = Read8(player, script);
             if (command == 0xFF)
             {
-                if (script.depth == 0)
+                if (!ead_common::ReturnFromCall(script))
                 {
                     DisableChannel(index);
                     break;
                 }
-
-                script.depth--;
-                script.pc = script.stack[script.depth & 3];
             }
 
             if (command == 0xFE)
@@ -395,64 +346,30 @@ void EadEarlyPlayer::RunChannel(int index)
 
             if (command > 0xC0)
             {
+                if (ead_common::RunFlowCommand(player.bytes, script, command, value, false))
+                {
+                    continue;
+                }
+
                 switch (command)
                 {
-                case 0xFC:
-                    {
-                        const uint16_t target = Read16(player, script);
-                        script.stack[script.depth & 3] = script.pc;
-                        script.depth++;
-                        script.pc = target;
-                        break;
-                    }
-                case 0xF8:
-                    script.loops[script.depth & 3] = Read8(player, script);
-                    script.stack[script.depth & 3] = script.pc;
-                    script.depth++;
-                    break;
-                case 0xF7:
-                    {
-                        uint8_t& loops = script.loops[(script.depth - 1) & 3];
-                        loops--;
-                        if (loops != 0)
-                        {
-                            script.pc = script.stack[(script.depth - 1) & 3];
-                        }
-                        else
-                        {
-                            script.depth--;
-                        }
-
-                        break;
-                    }
                 case 0xF6:
                     script.depth--;
                     break;
-                case 0xFB:
-                case 0xFA:
-                case 0xF9:
-                case 0xF5:
-                    {
-                        const uint16_t target = Read16(player, script);
-                        if ((command == 0xFA && value != 0) || (command == 0xF9 && value >= 0) ||
-                            (command == 0xF5 && value < 0))
-                        {
-                            break;
-                        }
 
-                        script.pc = target;
-                        break;
-                    }
                 case 0xF2:
                     ClearPool(ChannelPool(index));
                     FillPool(ChannelPool(index), Read8(player, script));
                     break;
+
                 case 0xF1:
                     ClearPool(ChannelPool(index));
                     break;
+
                 case 0xC2:
                     channel.dynamic_table = Read16(player, script);
                     break;
+
                 case 0xC5:
                     if (value != -1)
                     {
@@ -460,27 +377,33 @@ void EadEarlyPlayer::RunChannel(int index)
                         channel.dynamic_table =
                             static_cast<uint16_t>((PeekByte(player, entry) << 8) + PeekByte(player, entry + 1));
                     }
-
                     break;
+
                 case 0xC1:
                     SetInstrument(index, Read8(player, script));
                     break;
+
                 case 0xC3:
                     channel.large_notes = false;
                     break;
+
                 case 0xC4:
                     channel.large_notes = true;
                     break;
+
                 case 0xDF:
                     channel.volume = static_cast<float>(Read8(player, script)) / 127.0F;
                     break;
+
                 case 0xE0:
                     channel.volume_scale = static_cast<float>(Read8(player, script)) / 128.0F;
                     break;
+
                 case 0xDE:
                     channel.frequency_scale =
                         static_cast<float>(static_cast<int32_t>(Read16(player, script))) / 32768.0F;
                     break;
+
                 case 0xD3:
                     {
                         const auto bend = static_cast<uint8_t>(Read8(player, script) + 127);
@@ -488,26 +411,33 @@ void EadEarlyPlayer::RunChannel(int index)
                             bend < tables::kBendScale.size() ? tables::kBendScale[bend] : tables::kNoteFrequencies[0];
                         break;
                     }
+
                 case 0xDD:
                     channel.pan = static_cast<float>(Read8(player, script)) / 128.0F;
                     break;
+
                 case 0xDC:
                     channel.pan_weight = static_cast<float>(Read8(player, script)) / 128.0F;
                     break;
+
                 case 0xDB:
                     channel.transpose = static_cast<int8_t>(Read8(player, script));
                     break;
+
                 case 0xDA:
                     channel.adsr.envelope = {.player = player_index, .offset = Read16(player, script)};
                     break;
+
                 case 0xD9:
                     channel.adsr.release = Read8(player, script);
                     break;
+
                 case 0xD8:
                     channel.vibrato_extent_target = static_cast<uint16_t>(Read8(player, script) * 8);
                     channel.vibrato_extent_start = 0;
                     channel.vibrato_extent_delay = 0;
                     break;
+
                 case 0xD7:
                     {
                         const auto rate = static_cast<uint16_t>(Read8(player, script) * 32);
@@ -516,25 +446,31 @@ void EadEarlyPlayer::RunChannel(int index)
                         channel.vibrato_rate_delay = 0;
                         break;
                     }
+
                 case 0xE2:
                     channel.vibrato_extent_start = static_cast<uint16_t>(Read8(player, script) * 8);
                     channel.vibrato_extent_target = static_cast<uint16_t>(Read8(player, script) * 8);
                     channel.vibrato_extent_delay = static_cast<uint16_t>(Read8(player, script) * 16);
                     break;
+
                 case 0xE1:
                     channel.vibrato_rate_start = static_cast<uint16_t>(Read8(player, script) * 32);
                     channel.vibrato_rate_target = static_cast<uint16_t>(Read8(player, script) * 32);
                     channel.vibrato_rate_delay = static_cast<uint16_t>(Read8(player, script) * 16);
                     break;
+
                 case 0xE3:
                     channel.vibrato_delay = static_cast<uint16_t>(Read8(player, script) * 16);
                     break;
+
                 case 0xD6:
                     Read8(player, script);
                     break;
+
                 case 0xD4:
                     channel.reverb = Read8(player, script);
                     break;
+
                 case 0xC6:
                     {
                         const uint8_t from_back = Read8(player, script);
@@ -543,9 +479,9 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             channel.bank = set[set.size() - 1 - from_back];
                         }
-
                         break;
                     }
+
                 case 0xC7:
                     {
                         const uint8_t add = Read8(player, script);
@@ -554,46 +490,53 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             player.bytes[place] = static_cast<uint8_t>(static_cast<uint8_t>(value) + add);
                         }
-
                         break;
                     }
+
                 case 0xC8:
                     value = static_cast<int8_t>(value - static_cast<int8_t>(Read8(player, script)));
                     break;
+
                 case 0xC9:
                     value = static_cast<int8_t>(value & static_cast<int8_t>(Read8(player, script)));
                     break;
+
                 case 0xCC:
                     value = static_cast<int8_t>(Read8(player, script));
                     break;
+
                 case 0xCA:
                     channel.mute_behavior = Read8(player, script);
                     break;
+
                 case 0xCB:
                     {
                         const int32_t place = int32_t{Read16(player, script)} + value;
                         value = static_cast<int8_t>(PeekByte(player, static_cast<uint32_t>(place)));
                         break;
                     }
+
                 case 0xD0:
                     channel.stereo_effects = Read8(player, script) != 0;
                     break;
+
                 case 0xD1:
                     channel.policy = Read8(player, script);
                     break;
+
                 case 0xD2:
                     channel.adsr.sustain = static_cast<uint16_t>(Read8(player, script) << 8);
                     break;
+
                 case 0xE4:
                     if (value != -1)
                     {
                         const uint32_t entry = channel.dynamic_table + static_cast<uint32_t>(int32_t{value} * 2);
-                        script.stack[script.depth & 3] = script.pc;
-                        script.depth++;
-                        script.pc = static_cast<uint16_t>((PeekByte(player, entry) << 8) + PeekByte(player, entry + 1));
+                        ead_common::Call(script, static_cast<uint16_t>((PeekByte(player, entry) << 8) +
+                                                                       PeekByte(player, entry + 1)));
                     }
-
                     break;
+
                 default:
                     break;
                 }
@@ -610,22 +553,25 @@ void EadEarlyPlayer::RunChannel(int index)
                     {
                         value = layers_[static_cast<std::size_t>(channel.layers[layer_slot])].finished ? 1 : 0;
                     }
-
                     break;
+
                 case 0x70:
                     channel.ports[static_cast<std::size_t>(low & 7)] = value;
                     break;
+
                 case 0x80:
                     value = channel.ports[static_cast<std::size_t>(low & 7)];
+
                     if (low < 4)
                     {
                         channel.ports[static_cast<std::size_t>(low)] = -1;
                     }
-
                     break;
+
                 case 0x50:
                     value = static_cast<int8_t>(value - channel.ports[static_cast<std::size_t>(low & 7)]);
                     break;
+
                 case 0x90:
                     {
                         const uint16_t target = Read16(player, script);
@@ -633,16 +579,16 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             layers_[static_cast<std::size_t>(channel.layers[layer_slot])].script.pc = target;
                         }
-
                         break;
                     }
+
                 case 0xA0:
                     if (real_slot)
                     {
                         FreeLayer(index, low);
                     }
-
                     break;
+
                 case 0xB0:
                     if (value != -1 && real_slot && SetLayer(index, low) != -1)
                     {
@@ -650,14 +596,16 @@ void EadEarlyPlayer::RunChannel(int index)
                         layers_[static_cast<std::size_t>(channel.layers[layer_slot])].script.pc =
                             static_cast<uint16_t>((PeekByte(player, entry) << 8) + PeekByte(player, entry + 1));
                     }
-
                     break;
+
                 case 0x60:
                     channel.priority = static_cast<uint8_t>(low);
                     break;
+
                 case 0x10:
                     EnableChannel(player_index, low, Read16(player, script));
                     break;
+
                 case 0x20:
                     {
                         const int other = player.channels[static_cast<std::size_t>(low)];
@@ -665,9 +613,9 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             DisableChannel(other);
                         }
-
                         break;
                     }
+
                 case 0x30:
                     {
                         const uint8_t port = Read8(player, script);
@@ -676,9 +624,9 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             channels_[static_cast<std::size_t>(other)].ports[port & 7] = value;
                         }
-
                         break;
                     }
+
                 case 0x40:
                     {
                         const uint8_t port = Read8(player, script);
@@ -687,9 +635,9 @@ void EadEarlyPlayer::RunChannel(int index)
                         {
                             value = channels_[static_cast<std::size_t>(other)].ports[port & 7];
                         }
-
                         break;
                     }
+
                 default:
                     break;
                 }
@@ -745,72 +693,50 @@ void EadEarlyPlayer::RunLayer(int index)
             break;
         }
 
+        if (ead_common::RunLayerFlowCommand(player.bytes, script, command, false))
+        {
+            continue;
+        }
+
         switch (command)
         {
         case 0xFF:
-            if (script.depth == 0)
+            if (!ead_common::ReturnFromCall(script))
             {
                 DisableLayer(index);
                 return;
             }
+            break;
 
-            script.depth--;
-            script.pc = script.stack[script.depth & 3];
-            break;
-        case 0xFC:
-            {
-                const uint16_t target = Read16(player, script);
-                script.stack[script.depth & 3] = script.pc;
-                script.depth++;
-                script.pc = target;
-                break;
-            }
-        case 0xF8:
-            script.loops[script.depth & 3] = Read8(player, script);
-            script.stack[script.depth & 3] = script.pc;
-            script.depth++;
-            break;
-        case 0xF7:
-            {
-                uint8_t& loops = script.loops[(script.depth - 1) & 3];
-                loops--;
-                if (loops != 0)
-                {
-                    script.pc = script.stack[(script.depth - 1) & 3];
-                }
-                else
-                {
-                    script.depth--;
-                }
-
-                break;
-            }
-        case 0xFB:
-            script.pc = Read16(player, script);
-            break;
         case 0xC1:
             {
                 const uint8_t velocity = Read8(player, script);
                 layer.velocity_square = static_cast<float>(int32_t{velocity} * velocity);
                 break;
             }
+
         case 0xCA:
             layer.pan = static_cast<float>(Read8(player, script)) / 128.0F;
             break;
+
         case 0xC2:
             layer.transpose = static_cast<int16_t>(Read8(player, script));
             break;
+
         case 0xC9:
             layer.gate = Read8(player, script);
             break;
+
         case 0xC4:
         case 0xC5:
             layer.continuous = command == 0xC4;
             DecayOrRelease(index, AdsrPhase::kDecay);
             break;
+
         case 0xC3:
             layer.default_length = static_cast<int16_t>(ReadVariable(player, script));
             break;
+
         case 0xC6:
             {
                 const uint8_t program = Read8(player, script);
@@ -818,9 +744,9 @@ void EadEarlyPlayer::RunLayer(int index)
                 {
                     FindInstrument(channel, program, layer.instrument, layer.adsr);
                 }
-
                 break;
             }
+
         case 0xC7:
             {
                 layer.portamento.mode = Read8(player, script);
@@ -832,6 +758,7 @@ void EadEarlyPlayer::RunLayer(int index)
                 }
 
                 layer.portamento_target = target;
+
                 if ((layer.portamento.mode & 0x80) != 0)
                 {
                     layer.portamento_time = Read8(player, script);
@@ -840,12 +767,13 @@ void EadEarlyPlayer::RunLayer(int index)
                 {
                     layer.portamento_time = ReadVariable(player, script);
                 }
-
                 break;
             }
+
         case 0xC8:
             layer.portamento.mode = 0;
             break;
+
         default:
             if ((command & 0xF0) == 0xD0)
             {
@@ -863,7 +791,6 @@ void EadEarlyPlayer::RunLayer(int index)
                                                                             static_cast<uint32_t>(from_table))
                                                      : tables::kShortGate[from_table];
             }
-
             break;
         }
     }
@@ -889,12 +816,14 @@ void EadEarlyPlayer::RunLayer(int index)
                 layer.gate = Read8(player, script);
                 layer.last_length = static_cast<int16_t>(length);
                 break;
+
             case 0x40:
                 length = ReadVariable(player, script);
                 velocity = Read8(player, script);
                 layer.gate = 0;
                 layer.last_length = static_cast<int16_t>(length);
                 break;
+
             default:
                 length = static_cast<uint16_t>(layer.last_length);
                 velocity = Read8(player, script);
@@ -912,9 +841,11 @@ void EadEarlyPlayer::RunLayer(int index)
                 length = ReadVariable(player, script);
                 layer.last_length = static_cast<int16_t>(length);
                 break;
+
             case 0x40:
                 length = static_cast<uint16_t>(layer.default_length);
                 break;
+
             default:
                 length = static_cast<uint16_t>(layer.last_length);
                 break;
@@ -924,6 +855,7 @@ void EadEarlyPlayer::RunLayer(int index)
         auto semitone = static_cast<uint8_t>(command - (command & 0xC0));
         layer.delay = static_cast<int16_t>(length);
         layer.duration = static_cast<int16_t>(layer.gate * int32_t{length} / 256);
+
         if ((player.muted && (channel.mute_behavior & kMuteStopNotes) != 0) || !channel.has_instrument)
         {
             layer.silent = true;
@@ -1020,16 +952,19 @@ void EadEarlyPlayer::RunLayer(int index)
                         other = from_note;
                         base = to_note;
                         break;
+
                     case 2:
                     case 4:
                         base = from_note;
                         other = to_note;
                         break;
+
                     default:
                         break;
                     }
 
                     layer.portamento.extent = other / base - 1.0F;
+
                     if ((layer.portamento.mode & 0x80) != 0)
                     {
                         layer.portamento.speed = 32512.0F * static_cast<float>(static_cast<int32_t>(player.tempo)) /
@@ -1044,6 +979,7 @@ void EadEarlyPlayer::RunLayer(int index)
 
                     layer.portamento.position = 0.0F;
                     layer.frequency_scale = base;
+
                     if (PortamentoMode(layer.portamento.mode) == 5)
                     {
                         layer.portamento_target = semitone;

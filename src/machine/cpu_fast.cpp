@@ -2,13 +2,13 @@
 
 // The legacy timing's short path. RunFast runs the instructions that games run most from a table of decoded
 // instructions, with the program counter, the clock and the delay slot in local variables. Anything else returns to
-// RunLate, which runs that instruction through Step. The two paths give the same result. Both follow the rules of the
+// RunLate. RunLate runs that instruction through Step. The two paths give the same result. Both follow the rules of the
 // legacy timing.
 //
 // Each table entry counts only while its `word` equals the word in RDRAM. No write to RDRAM has to tell the table.
 //
 // Games often wait in a short loop until an event changes memory. Such a loop changes nothing after its first pass.
-// Only an event can change that, since the RSP's tasks and the DMAs run in the event handlers. RunFast therefore moves
+// Only an event can change that: the RSP's tasks and the DMAs run in the event handlers. RunFast therefore moves
 // the clock to the end of the pass at which the next event is due. The pass count, Count and Random come out as they
 // would if the loop had run.
 //
@@ -73,7 +73,7 @@ Cpu::FastInstruction Cpu::DecodeFast(uint32_t instruction)
     decoded.rd = static_cast<uint8_t>(Rd(instruction));
     decoded.immediate = static_cast<int32_t>(static_cast<int16_t>(instruction));
 
-    // An operation with register 0 as its destination does nothing. A load can still fault, so it stays with Step.
+    // An operation with register 0 as its destination does nothing. A load can still fault, and Step runs it.
     const auto set_register = [&decoded](FastOp op)
     {
         decoded.op = decoded.rd == 0 ? FastOp::kNop : op;
@@ -585,7 +585,7 @@ bool Cpu::RunFast(uint64_t until)
     // These lambdas are always inlined. A call would keep the clock and the program counter in memory for the whole
     // loop.
 
-    // Leaves the state for Step, as if `index` were the next instruction to run. `slot` says that it's in a delay slot.
+    // Leaves the state for Step as if `index` were the next instruction to run. `slot` says that it's in a delay slot.
     const auto leave = [&](bool slot) ULTRALIB_INLINE_LAMBDA
     {
         now_ = now;
@@ -1271,7 +1271,7 @@ bool Cpu::RunFast(uint64_t until)
                 }
                 if (same)
                 {
-                    // Nothing changed in a whole pass, so nothing will until an event or a new value of VI_CURRENT.
+                    // Nothing changed in a whole pass. Nothing will until an event or a new value of VI_CURRENT.
                     // Runs up to the pass at whose end the event is due, or up to the last whole pass of this run. A
                     // pass that reads VI_CURRENT has to run before its value changes.
                     watch.changes = 0;

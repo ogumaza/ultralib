@@ -25,6 +25,7 @@ using audio_rsp_common::kFlagLoop;
 using audio_rsp_common::kIn;
 using audio_rsp_common::kOut;
 using audio_rsp_common::MixSample;
+using audio_rsp_common::MoveDmem16;
 using audio_rsp_common::MultiplyHigh;
 using audio_rsp_common::RecordDma;
 using audio_rsp_common::RoundedUp;
@@ -67,42 +68,55 @@ void AudioRsp::RunEadFirst(const AudioCommand& command, AudioBus& bus)
     case 0x01:
         Adpcm(command, bus);
         break;
+
     case 0x02:
         ClearBuffer(command);
         break;
+
     case 0x05:
         Resample(command, bus);
         break;
+
     case 0x07:
         Segment(command);
         break;
+
     case 0x08:
         SetBuffer(command);
         break;
+
     case 0x0A:
         DmemMove(command);
         break;
+
     case 0x0B:
         LoadAdpcm(command, bus);
         break;
+
     case 0x0C:
         EadMixer(command);
         break;
+
     case 0x0D:
         Interleave(command);
         break;
+
     case 0x0E:
         PoleFilter(command, bus);
         break;
+
     case 0x0F:
         SetLoop(command);
         break;
+
     case 0x10:
         EadCopyRepeated(command);
         break;
+
     case 0x11:
         EadHalve(command);
         break;
+
     case 0x12:
         // The ramps' steps stay in two of the microcode's registers.
         gains_ = {};
@@ -110,19 +124,24 @@ void AudioRsp::RunEadFirst(const AudioCommand& command, AudioBus& bus)
         ramp_left_ = command.w1 >> 16;
         ramp_right_ = command.w1 & 0xFFFF;
         break;
+
     case 0x13:
         EadFirstEnvMixer(command);
         break;
+
     case 0x14:
         EadLoad(command, bus);
         break;
+
     case 0x15:
         EadSave(command, bus);
         break;
+
     case 0x16:
         gains_[0] = static_cast<int16_t>(command.w1 >> 16);
         gains_[2] = static_cast<int16_t>(command.w1);
         break;
+
     default:
         break;
     }
@@ -138,34 +157,42 @@ void AudioRsp::RunEadLate(const AudioCommand& command, AudioBus& bus)
         {
             EadMultiplyTable(command);
         }
-
         break;
+
     case 0x01:
         Adpcm(command, bus);
         break;
+
     case 0x02:
         ClearBuffer(command);
         break;
+
     case 0x04:
         EadAddBuffer(command);
         break;
+
     case 0x05:
         EadLateResample(command, bus);
         break;
+
     case 0x06:
         EadZeroOrderResample(command);
         break;
+
     case 0x07:
         EadFilter(command, bus);
         break;
+
     case 0x08:
         SetField(kIn, static_cast<uint16_t>(command.w0));
         SetField(kOut, static_cast<uint16_t>(command.w1 >> 16));
         SetField(kCount, static_cast<uint16_t>(command.w1));
         break;
+
     case 0x09:
         EadDuplicate(command);
         break;
+
     case 0x0A:
         if (third)
         {
@@ -175,29 +202,36 @@ void AudioRsp::RunEadLate(const AudioCommand& command, AudioBus& bus)
         {
             DmemMove(command);
         }
-
         break;
+
     case 0x0B:
         LoadAdpcm(command, bus);
         break;
+
     case 0x0C:
         EadMixer(command);
         break;
+
     case 0x0D:
         EadInterleave(command);
         break;
+
     case 0x0E:
         EadGain(command);
         break;
+
     case 0x0F:
         SetLoop(command);
         break;
+
     case 0x10:
         EadCopyRepeated(command);
         break;
+
     case 0x11:
         EadHalve(command);
         break;
+
     case 0x12:
         {
             gains_ = {};
@@ -209,15 +243,19 @@ void AudioRsp::RunEadLate(const AudioCommand& command, AudioBus& bus)
             ramp_right_ = command.w1 & 0xFFFF;
             break;
         }
+
     case 0x13:
         EadLateEnvMixer(command);
         break;
+
     case 0x14:
         EadLoad(command, bus);
         break;
+
     case 0x15:
         EadSave(command, bus);
         break;
+
     case 0x16:
         {
             const uint32_t left = command.w1 >> 16;
@@ -228,9 +266,11 @@ void AudioRsp::RunEadLate(const AudioCommand& command, AudioBus& bus)
             gains_[3] = static_cast<int16_t>(right + ramp_right_);
             break;
         }
+
     case 0x17:
         EadDecodeBytes(command, bus);
         break;
+
     default:
         break;
     }
@@ -372,6 +412,7 @@ void AudioRsp::EadDuplicate(const AudioCommand& command)
     do
     {
         times--;
+
         for (uint32_t i = 0; i < 8; i++)
         {
             StoreQuad(vectors[i], to + i * 16);
@@ -557,6 +598,7 @@ void AudioRsp::EadLateEnvMixer(const AudioCommand& command)
         places.wet_left += 32;
         places.wet_right += 32;
         count -= 16;
+
         for (std::size_t i = 0; i < steps.size(); i++)
         {
             gains_[i] = static_cast<int16_t>(static_cast<uint16_t>(gains_[i]) + steps[i]);
@@ -572,7 +614,7 @@ void AudioRsp::RecordEadLateEnv(const EnvPlaces& places, const EnvMasks& masks, 
     env.bytes = static_cast<uint32_t>(std::max(count, 16)) * 2;
     env.swap = masks.swap;
 
-    // Each pair of a microcode's gains holds a value and the value 8 samples on. The ramps run past the end where
+    // Each pair of a microcode's gains contains a value and the value 8 samples on. The ramps run past the end where
     // the count isn't a multiple of their steps. The gains at the end of the samples don't.
     const float groups = static_cast<float>(std::max(count, 16)) / 8.0F;
     const auto gain_at_end = [this, groups](std::size_t first)
@@ -720,7 +762,7 @@ void AudioRsp::EadFilter(const AudioCommand& command, AudioBus& bus)
         DmaRead(state_place, address, 31, bus);
     }
 
-    // The taps: the mean of the set's taps and the taps that the state holds.
+    // The taps: the mean of the set's taps and the taps that the state contains.
     Vector first_taps = {};
     Vector second_taps = {};
     LoadQuad(first_taps, coefficients + 16);
@@ -887,17 +929,7 @@ void AudioRsp::EadThirdDmemMove(const AudioCommand& command)
 
     while (count >= 16)
     {
-        std::array<uint8_t, 16> bytes;
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            bytes[i] = dmem_[(from + i) & kDmemMask];
-        }
-
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            dmem_[(to + i) & kDmemMask] = bytes[i];
-        }
-
+        MoveDmem16(dmem_, from, to);
         count -= 16;
         from += 16;
         to += 16;
@@ -928,6 +960,7 @@ void AudioRsp::EadMultiplyTable(const AudioCommand& command)
     {
         RecordOp(AudioOpKind::kMultiply, place, place, RoundedUp(count, 64));
         ops_->ops.back().extra = static_cast<uint32_t>(ops_->tables.size());
+
         for (const Vector& factor : factors)
         {
             ops_->tables.insert(ops_->tables.end(), factor.begin(), factor.end());

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// The games on Intelligent Systems' sound engine, which keep their sound in an SBN archive. n64/sbn.h gives the
+// The games on Intelligent Systems' sound engine. They keep their sound in an SBN archive, and n64/sbn.h gives the
 // archive's form. A song holds up to four compositions, and the game's code chooses one. A composition plays phrases in
 // turn. A phrase holds up to 16 tracks of notes and commands, and it ends when any of them ends.
 //
@@ -14,8 +14,9 @@
 //   master volume. The mixer squares it. Velocity, CC7 and CC11 act squared in SoundFont and SFZ too.
 // - An envelope is a list of steps. Each holds a time, from a table in the game's code, and a level. The mixer moves in
 //   a straight line of amplitude to the square of each level.
-// - A track has up to four voices. A track of one voice cuts its note for the next. A track of more takes a free voice,
-//   or else cuts the one that has been released, or else the note with the least time left.
+// - A track's polyphony gives it up to four voices: 1 gives one voice, 5 to 7 give two to four, and 0 and 2 to 4 give
+//   none. A track of one voice cuts its note for the next. A track of more takes a free voice, or else cuts the one
+//   that has been released, or else the note with the least time left.
 
 #pragma once
 
@@ -33,7 +34,9 @@
 #include <vector>
 
 #include "ntdlib/sequence_export/frame.h"
+
 #include "ultralib/n64/sbn.h"
+#include "ultralib/n64/sbn_player.h"
 #include "ultralib/sequence_export/n64/games.h"
 #include "ultralib/sequence_export/n64/instruments.h"
 
@@ -104,7 +107,7 @@ SbnPerformance PerformSbn(const ultralib::n64::BgmFile& file, std::span<const ul
 // The compositions of `file` that play something, each once. Two that list the same phrases play the same.
 std::vector<int> SbnVariations(const ultralib::n64::BgmFile& file);
 
-// An instrument's sound, as its zones take it. Each list runs to its end byte.
+// The sound of an instrument in the form that its zones use. Each list runs to its end byte.
 struct SbnSound
 {
     int key_base = 0; // in cents
@@ -124,11 +127,14 @@ std::vector<Zone> SbnInstrumentZones(const SbnSound& sound, const SbnPresetKey& 
 Zone SbnDrumZone(const SbnSound& sound, const ultralib::n64::BgmDrum& drum, int key, int tune_cents,
                  std::span<const int32_t> times, uint32_t output_rate);
 
+// Reads the tables of the engine's code that `profile` places in `image`. The model of the engine uses them.
+ultralib::n64::SbnTables ReadSbnTables(std::span<const uint8_t> image, const SbnProfile& profile);
+
 // A game on Intelligent Systems' engine.
 class SbnGame
 {
 public:
-    // Reads the game's archive from `image`, which stays valid while the game lives.
+    // Reads the game's archive from `image`. The image stays valid while the game lives.
     static std::unique_ptr<SbnGame> Open(std::span<const uint8_t> image, const SbnProfile& profile);
 
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
@@ -165,7 +171,7 @@ private:
     std::span<const uint8_t> image_;
     const SbnProfile* profile_ = nullptr;
     ultralib::n64::SbnArchive archive_;
-    std::vector<int32_t> times_;
+    ultralib::n64::SbnTables tables_;
     std::vector<ultralib::n64::BgmDrum> per_;
     std::vector<ultralib::n64::BgmInstrument> prg_;
     std::array<std::array<uint16_t, 16>, 7> init_files_ = {}; // by the game's number of a set of banks, and by bank

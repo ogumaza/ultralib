@@ -54,7 +54,7 @@ public:
         return static_cast<uint32_t>(start);
     }
 
-    // Bytes that lie outside the memory read as zero. The console's DMA would read other memory there.
+    // Bytes outside the memory read as zero. The console's DMA would read other memory there.
     void Read(uint32_t address, uint8_t* out, std::size_t size) const override
     {
         const std::span<const uint8_t> bytes = address >= kImageBase ? image_ : std::span<const uint8_t>(work_);

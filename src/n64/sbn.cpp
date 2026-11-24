@@ -9,13 +9,13 @@
 #include <cstring>
 #include <set>
 #include <span>
-#include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
+
+#include "bank_layout.h"
 
 namespace ultralib::n64
 {
@@ -208,19 +208,24 @@ private:
             case BgmOp::kEnd:
             case BgmOp::kReturn:
                 return;
+
             case BgmOp::kInvalid:
                 walk_.bad_offsets.push_back(command.offset);
 
                 return;
+
             case BgmOp::kNote:
                 walk_.notes++;
                 break;
+
             case BgmOp::kDetour:
                 walk_.detours++;
                 break;
+
             case BgmOp::kBranch:
                 FollowBranch(command);
                 break;
+
             default:
                 break;
             }
@@ -728,32 +733,23 @@ VadpcmBook BkFile::Book(const BkInstrument& instrument) const
         throw xsflib::FormatError("a book of a BK file has a bad place or size");
     }
 
+    // The book has no header: its order is always 2.
     VadpcmBook book;
     book.order = kOrder;
     book.predictor_count = static_cast<int32_t>(size / kPredictorBytes);
-    book.coefficients.reserve(size / 2);
-    for (std::size_t i = 0; i < size; i += 2)
-    {
-        book.coefficients.push_back(static_cast<int16_t>(xsflib::LoadBe16(bytes_.data() + instrument.book + i)));
-    }
+    book.coefficients = bank_layout::ReadCoefficients(xsflib::Reader(bytes_, true), instrument.book, size / 2);
 
     return book;
 }
 
 VadpcmState BkFile::LoopState(const BkInstrument& instrument) const
 {
-    VadpcmState state = {};
-    if (instrument.loop_state + state.size() * 2 > bytes_.size())
+    if (instrument.loop_state + kVadpcmFrameSamples * 2 > bytes_.size())
     {
         throw xsflib::FormatError("a loop's state of a BK file leaves the file");
     }
 
-    for (std::size_t i = 0; i < state.size(); i++)
-    {
-        state[i] = static_cast<int16_t>(xsflib::LoadBe16(bytes_.data() + instrument.loop_state + i * 2));
-    }
-
-    return state;
+    return bank_layout::ReadLoopState(xsflib::Reader(bytes_, true), instrument.loop_state);
 }
 
 std::span<const uint8_t> BkFile::Wave(const BkInstrument& instrument) const

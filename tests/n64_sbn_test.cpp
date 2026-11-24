@@ -5,7 +5,6 @@
 // layouts.
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -16,6 +15,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/sbn.h"
 
 using xsflib::testing::ErrorOf;
@@ -25,28 +25,12 @@ namespace
 
 namespace n64 = ultralib::n64;
 
-using Bytes = std::vector<uint8_t>;
-
-void Put16(Bytes& out, uint16_t value)
-{
-    out.push_back(static_cast<uint8_t>(value >> 8));
-    out.push_back(static_cast<uint8_t>(value));
-}
-
-void Put32(Bytes& out, uint32_t value)
-{
-    Put16(out, static_cast<uint16_t>(value >> 16));
-    Put16(out, static_cast<uint16_t>(value));
-}
+using ultralib::testing::Append;
+using ultralib::testing::Bytes;
 
 void PutText(Bytes& out, std::string_view text)
 {
     out.insert(out.end(), text.begin(), text.end());
-}
-
-void Append(Bytes& out, std::initializer_list<uint8_t> bytes)
-{
-    out.insert(out.end(), bytes);
 }
 
 // A BGM file with one composition, one phrase and one track, and a table of one drum and one instrument.
@@ -59,29 +43,29 @@ Bytes MakeBgm()
 {
     Bytes bgm;
     PutText(bgm, "BGM ");
-    Put32(bgm, 0xBC);
+    xsflib::AppendBe32(bgm, 0xBC);
     PutText(bgm, "TEST");
-    Put32(bgm, 0);
+    xsflib::AppendBe32(bgm, 0);
     Append(bgm, {4, 0, 0, 0});
-    Put16(bgm, 0x24 >> 2);
-    Put16(bgm, 0);
-    Put16(bgm, 0);
-    Put16(bgm, 0);
-    Put16(bgm, 0xA8 >> 2);
-    Put16(bgm, 1);
-    Put16(bgm, 0xB4 >> 2);
-    Put16(bgm, 1);
+    xsflib::AppendBe16(bgm, 0x24 >> 2);
+    xsflib::AppendBe16(bgm, 0);
+    xsflib::AppendBe16(bgm, 0);
+    xsflib::AppendBe16(bgm, 0);
+    xsflib::AppendBe16(bgm, 0xA8 >> 2);
+    xsflib::AppendBe16(bgm, 1);
+    xsflib::AppendBe16(bgm, 0xB4 >> 2);
+    xsflib::AppendBe16(bgm, 1);
 
-    Put32(bgm, 0x10000000 | (0x10 >> 2));
-    Put32(bgm, 0x30000001);
-    Put32(bgm, 0x50000000 | (3 << 5) | 1);
-    Put32(bgm, 0);
+    xsflib::AppendBe32(bgm, 0x10000000 | (0x10 >> 2));
+    xsflib::AppendBe32(bgm, 0x30000001);
+    xsflib::AppendBe32(bgm, 0x50000000 | (3 << 5) | 1);
+    xsflib::AppendBe32(bgm, 0);
 
     // The track starts 0x40 bytes after the phrase. It's a drum track with a polyphony of 2 voices (index 5).
-    Put32(bgm, (0x40U << 16) | (5U << 13) | 0x80);
+    xsflib::AppendBe32(bgm, (0x40U << 16) | (5U << 13) | 0x80);
     for (int i = 1; i < 16; i++)
     {
-        Put32(bgm, 0);
+        xsflib::AppendBe32(bgm, 0);
     }
 
     // 0x74: tempo; a wait of 16; a note of key 0x10 with a length of 1; a note with a long length; a long wait; a
@@ -109,12 +93,12 @@ Bytes MakeBgm()
     Append(bgm, {0x93, 0x63, 0x07, 0x00});
 
     // 0xA8: the drum.
-    Put16(bgm, 0x3004);
-    Put16(bgm, 6000);
+    xsflib::AppendBe16(bgm, 0x3004);
+    xsflib::AppendBe16(bgm, 6000);
     Append(bgm, {100, 0xC0, 7, 1, 2, 3, 4, 9});
 
     // 0xB4: the instrument.
-    Put16(bgm, 0x3105);
+    xsflib::AppendBe16(bgm, 0x3105);
     Append(bgm, {90, 40, 8, 0xFE, 0x05, 0x0A});
 
     return bgm;
@@ -232,43 +216,43 @@ Bytes MakeBk()
 {
     Bytes bank;
     Append(bank, {'B', 'K', ' ', ' '});
-    Put32(bank, 0x40 + 0x30 + 0x20 + 0x20 + 9);
+    xsflib::AppendBe32(bank, 0x40 + 0x30 + 0x20 + 0x20 + 9);
     Append(bank, {'N', 'A', 'M', 'E'});
     Append(bank, {'C', 'R', 0, 0, 0, 0});
 
     // The offsets of the instruments, from 0x12.
-    Put16(bank, 0);
-    Put16(bank, 0);
-    Put16(bank, 0x40);
+    xsflib::AppendBe16(bank, 0);
+    xsflib::AppendBe16(bank, 0);
+    xsflib::AppendBe16(bank, 0x40);
     for (int i = 3; i < 16; i++)
     {
-        Put16(bank, 0);
+        xsflib::AppendBe16(bank, 0);
     }
 
     bank.resize(0x40, 0);
-    Put32(bank, 0xB0); // the wave
-    Put32(bank, 9);    // its size
-    Put32(bank, 0x70); // the loop's state
-    Put32(bank, 0);    // the loop's start
-    Put32(bank, 16);   // its end
-    Put32(bank, 0xFFFFFFFF);
-    Put32(bank, 0x90); // the book
-    Put16(bank, 32);
-    Put16(bank, 6000);
-    Put32(bank, 32000);
+    xsflib::AppendBe32(bank, 0xB0); // the wave
+    xsflib::AppendBe32(bank, 9);    // its size
+    xsflib::AppendBe32(bank, 0x70); // the loop's state
+    xsflib::AppendBe32(bank, 0);    // the loop's start
+    xsflib::AppendBe32(bank, 16);   // its end
+    xsflib::AppendBe32(bank, 0xFFFFFFFF);
+    xsflib::AppendBe32(bank, 0x90); // the book
+    xsflib::AppendBe16(bank, 32);
+    xsflib::AppendBe16(bank, 6000);
+    xsflib::AppendBe32(bank, 32000);
     Append(bank, {0, 1, 2, 3, 4, 5, 6, 7});
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
 
     bank.resize(0x70, 0);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(bank, i);
+        xsflib::AppendBe16(bank, i);
     }
 
     bank.resize(0x90, 0);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(bank, static_cast<uint16_t>(i * 2));
+        xsflib::AppendBe16(bank, static_cast<uint16_t>(i * 2));
     }
 
     Append(bank, {0x10, 1, 2, 3, 4, 5, 6, 7, 8});
@@ -299,46 +283,46 @@ void TestArchive()
 {
     Bytes archive;
     PutText(archive, "SBN ");
-    Put32(archive, 0); // the size, filled in below
-    Put32(archive, 0);
-    Put32(archive, 0);
-    Put32(archive, 0x40);
-    Put32(archive, 3); // files
-    Put32(archive, 0);
-    Put32(archive, 0);
-    Put32(archive, 0);
-    Put32(archive, 0x60); // INIT
+    xsflib::AppendBe32(archive, 0); // the size, filled in below
+    xsflib::AppendBe32(archive, 0);
+    xsflib::AppendBe32(archive, 0);
+    xsflib::AppendBe32(archive, 0x40);
+    xsflib::AppendBe32(archive, 3); // files
+    xsflib::AppendBe32(archive, 0);
+    xsflib::AppendBe32(archive, 0);
+    xsflib::AppendBe32(archive, 0);
+    xsflib::AppendBe32(archive, 0x60); // INIT
     archive.resize(0x40, 0);
 
     // The table: the files at 0x90, 0x150 and 0x210.
     const Bytes bgm = MakeBgm();
     const Bytes bank = MakeBk();
-    Put32(archive, 0x90);
-    Put32(archive, 0x10000000 | static_cast<uint32_t>(bgm.size()));
-    Put32(archive, 0x150);
-    Put32(archive, 0x30000040);
-    Put32(archive, 0x210);
-    Put32(archive, 0x40000010);
+    xsflib::AppendBe32(archive, 0x90);
+    xsflib::AppendBe32(archive, 0x10000000 | static_cast<uint32_t>(bgm.size()));
+    xsflib::AppendBe32(archive, 0x150);
+    xsflib::AppendBe32(archive, 0x30000040);
+    xsflib::AppendBe32(archive, 0x210);
+    xsflib::AppendBe32(archive, 0x40000010);
     archive.resize(0x60, 0);
 
     // INIT: one bank from 0x20, one song from 0x24, two other files from 0x2C.
     PutText(archive, "INIT");
-    Put32(archive, 0x30);
-    Put16(archive, 0x20);
-    Put16(archive, 4);
-    Put16(archive, 0x24);
-    Put16(archive, 8);
-    Put16(archive, 0x2C);
-    Put16(archive, 4);
+    xsflib::AppendBe32(archive, 0x30);
+    xsflib::AppendBe16(archive, 0x20);
+    xsflib::AppendBe16(archive, 4);
+    xsflib::AppendBe16(archive, 0x24);
+    xsflib::AppendBe16(archive, 8);
+    xsflib::AppendBe16(archive, 0x2C);
+    xsflib::AppendBe16(archive, 4);
     archive.resize(0x80, 0);
-    Put16(archive, 1);
+    xsflib::AppendBe16(archive, 1);
     Append(archive, {2, 3});
-    Put16(archive, 0);
-    Put16(archive, 1);
-    Put16(archive, 0);
-    Put16(archive, 0);
-    Put16(archive, 7);
-    Put16(archive, 8);
+    xsflib::AppendBe16(archive, 0);
+    xsflib::AppendBe16(archive, 1);
+    xsflib::AppendBe16(archive, 0);
+    xsflib::AppendBe16(archive, 0);
+    xsflib::AppendBe16(archive, 7);
+    xsflib::AppendBe16(archive, 8);
 
     archive.resize(0x90, 0);
     archive.insert(archive.end(), bgm.begin(), bgm.end());
@@ -346,10 +330,10 @@ void TestArchive()
     archive.insert(archive.end(), bank.begin(), bank.end());
     archive.resize(0x210, 0);
     PutText(archive, "PER ");
-    Put32(archive, 0x10 + 12);
+    xsflib::AppendBe32(archive, 0x10 + 12);
     archive.resize(0x220, 0);
-    Put16(archive, 0x2001);
-    Put16(archive, 7200);
+    xsflib::AppendBe16(archive, 0x2001);
+    xsflib::AppendBe16(archive, 7200);
     Append(archive, {50, 64, 0, 0, 0, 0, 0, 0});
     xsflib::StoreBe32(archive.data() + 4, static_cast<uint32_t>(archive.size()));
 

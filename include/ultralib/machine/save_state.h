@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// The parts of a Project64 1.4 save state that the USF files and the ripper read too.
+// The parts of a Project64 1.4 save state that ultralib reads. A USF file keeps its state in this form.
 
 #pragma once
 

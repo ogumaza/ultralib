@@ -6,8 +6,8 @@
 //
 // A book holds the predictors. Each predictor has `order` rows of 8 coefficients. A coefficient is a fixed-point value
 // with 11 fractional bits. The audio microcodes and libultra's tools use an order of 2. Each sample of a group is the
-// sum of four parts, shifted right by 11 and saturated to 16 bits: the sample before the group times the first row, the
-// group's last sample before that times the second row, the residual shifted left by 11, and the group's earlier
+// sum of four parts, shifted right by 11 and saturated to 16 bits: the second sample before the group times the first
+// row, the sample just before the group times the second row, the residual shifted left by 11, and the group's earlier
 // residuals times the second row. The sum's shift rounds towards minus infinity.
 //
 // The decoder is the arithmetic of the audio microcodes. The encoder finds, for each frame, a predictor and a scale
@@ -68,8 +68,8 @@ struct VadpcmFrame
     std::array<uint8_t, kVadpcmFrameSize> Write() const;
 };
 
-// Decodes a frame. `state` holds the previous frame's samples and receives this frame's. A predictor that the book
-// lacks throws xsflib::FormatError.
+// Decodes a frame. `state` contains the previous frame's samples and receives this frame's. A predictor that isn't in
+// the book throws xsflib::FormatError.
 void DecodeVadpcmFrame(std::span<const uint8_t, kVadpcmFrameSize> frame, const VadpcmBook& book, VadpcmState& state);
 
 // Decodes every whole frame of `frames`, from a state of zeros or the given one. Bytes after the last whole frame are

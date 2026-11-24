@@ -31,6 +31,7 @@ using audio_rsp_common::LinearFirstRamp;
 using audio_rsp_common::LinearLimitLanes;
 using audio_rsp_common::LinearStepLanes;
 using audio_rsp_common::MixSample;
+using audio_rsp_common::MoveDmem16;
 using audio_rsp_common::MultiplyFraction;
 using audio_rsp_common::RecordDma;
 using audio_rsp_common::RoundedUp;
@@ -187,19 +188,9 @@ void AudioRsp::CompactMove(const AudioCommand& command)
         ops_->ops.back().group = 16;
     }
 
-    std::array<uint8_t, 16> bytes;
     do
     {
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            bytes[i] = dmem_[(from + i) & kDmemMask];
-        }
-
-        for (uint32_t i = 0; i < 16; i++)
-        {
-            dmem_[(to + i) & kDmemMask] = bytes[i];
-        }
-
+        MoveDmem16(dmem_, from, to);
         count -= 16;
         from += 16;
         to += 16;

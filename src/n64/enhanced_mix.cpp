@@ -698,6 +698,7 @@ void EnhancedMix::MixFrame(uint32_t muted, bool metered, const AudioBus& bus, Pe
             StartVoice(op.track, muted, metered);
             in_voice = true;
             break;
+
         case AudioOpKind::kVoicesEnd:
         case AudioOpKind::kChunkEnd:
             EndVoice();
@@ -707,11 +708,12 @@ void EnhancedMix::MixFrame(uint32_t muted, bool metered, const AudioBus& bus, Pe
             {
                 EndChunk(op.bytes / 2, peaks);
             }
-
             break;
+
         case AudioOpKind::kMainResample:
             RunMain(frame.mains[op.extra]);
             break;
+
         default:
             if (factor_ == 1)
             {
@@ -726,7 +728,6 @@ void EnhancedMix::MixFrame(uint32_t muted, bool metered, const AudioBus& bus, Pe
                 RunOp(low_, frame, op, bus);
                 RunOp(high_, frame, op, bus);
             }
-
             break;
         }
     }

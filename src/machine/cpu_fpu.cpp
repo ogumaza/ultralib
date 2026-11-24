@@ -8,8 +8,8 @@
 // VR4300's NaNs follow the old MIPS convention: a NaN with the top bit of its fraction set is signaling. Every NaN that
 // an operation produces is the default NaN.
 //
-// This file must be compiled with strict floating-point semantics, so that the compiler keeps each operation between
-// the calls that set the rounding mode and read the flags.
+// This file must be compiled with strict floating-point semantics. The compiler then keeps each operation between the
+// calls that set the rounding mode and read the flags.
 
 #include <bit>
 #include <cfenv>
@@ -20,6 +20,10 @@
 #include "ultralib/machine/bits.h"
 #include "ultralib/machine/cpu.h"
 #include "ultralib/machine/system.h"
+
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 namespace ultralib::machine
 {
@@ -139,7 +143,7 @@ int HostRounding(int mode)
 template <typename R, typename F>
 R HostCompute(bool traps, int mode, int& flags, F operation)
 {
-    // Without traps the flags have no effect. In the rounding mode that the host runs in, nothing needs setting.
+    // Without traps the flags have no effect. In the host's default rounding mode, nothing has to be set.
     if (!traps && mode == kRoundNearest)
     {
         volatile R result = operation();
@@ -155,6 +159,23 @@ R HostCompute(bool traps, int mode, int& flags, F operation)
     std::fesetround(saved);
 
     return result;
+}
+
+// Returns the square root of `value`, rounded in the host's current rounding mode. On x86 and x64 the SSE2 instruction
+// computes it. clang-cl's 32-bit builds call the C runtime's sqrt for std::sqrt, and that routine doesn't follow the
+// rounding mode.
+double SquareRoot(double value)
+{
+#if defined(__SSE2__)
+    return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(value)));
+#else
+    return std::sqrt(value);
+#endif
+}
+
+float SquareRoot(float value)
+{
+    return std::sqrt(value);
 }
 
 // Rounds to an integral value in one of FCR31's modes. Each step is exact.
@@ -735,7 +756,7 @@ void Cpu::FpuArithmetic(uint32_t funct, T a, T b, int fd, int mode)
         case 0x03:
             return a / b;
         case 0x04:
-            return std::sqrt(a);
+            return SquareRoot(a);
         case 0x05:
             return std::fabs(a);
         default:

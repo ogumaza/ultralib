@@ -4,18 +4,18 @@ ultralib is a C++20 library for the Nintendo 64: an emulator core that boots a g
 it, the readers and writers of the console's sound files, models of the games' sound engines and of the audio
 microcodes, and the conversion of the games' music to MIDI, SoundFont 2 and SFZ files.
 
-The emulator core builds on xsflib, a library for players and rippers of the PSF family, and needs nothing else. The
-sound modules build on ntdlib, a library for the formats and hardware of Nintendo's consoles, and through it on xsflib
-and seqlib. ultralib's modules are static libraries. A project links the modules it uses.
+The emulator core builds on xsflib, a library for players and rippers of the PSF family, and requires nothing else.
+The sound modules build on ntdlib, a library for the formats and hardware of Nintendo's consoles, and through it on
+xsflib and seqlib. ultralib's modules are static libraries. A project links the modules it uses.
 
-| Module | What it holds |
+| Module | Contents |
 |---|---|
 | `ultralib::machine` | The emulator core: the VR4300 CPU with COP0, the TLB and the FPU, the RSP with its vector unit and DMA, the interfaces of the RCP, the Aleck64 board, the PIF RAM and its joybus devices, boot, coverage, and Project64 1.4 save states. `ultralib::machine::System` (`ultralib/machine/system.h`) is the API |
-| `ultralib::rom_set` | The ROM sets of the Aleck64 games: the chips of each game, and the reading of a set, as a ZIP archive or a folder of its chips, into the image of a cartridge. A set that contains the chips of more than one game gives the image of the first and names the others. It links `xsflib::rom_set` alone, and builds only where xsflib builds that, with zlib |
-| `ultralib::n64` | The Nintendo 64's sound files: the readers and writers of libultra's sequence banks (S1) and bank files (B1), of standard and compressed MIDI, of VADPCM samples, and of the banks of Nintendo EAD's sound engines, with the reader of those engines' sequences. A file comes back byte for byte. Compressed MIDI files can be built from events, with new blocks. VADPCM frames come from samples by the rule of the SDK's encoder. Frame-by-frame models of the console's sequence players and audio microcodes run them, with snapshots, mutes, meters and an enhanced mixing mode. `ultralib/n64/song_names.h` contains the names of some games' songs. The header requires only the standard library. A project may include it without the module |
+| `ultralib::rom_set` | The ROM sets of the Aleck64 games: the chips of each game, and the reading of a set, as a ZIP archive or a folder of its chips, into the image of a cartridge. A set that contains the chips of more than one game gives the image of the first and names the others. It links only `xsflib::rom_set`, and builds only where xsflib builds that module, with zlib |
+| `ultralib::n64` | The Nintendo 64's sound files: the readers and writers of libultra's sequence banks (S1) and bank files (B1), of standard and compressed MIDI, of VADPCM samples, and of the banks of Nintendo EAD's sound engines, with the reader of those engines' sequences. It also reads the files of the N64 Music Tools and the SBN archives of Intelligent Systems' engine, and reads and writes the archives' BGM and BK files. A file that is read and written again comes back byte for byte. Compressed MIDI files can be built from events, with new blocks. The VADPCM encoder follows the rule of the SDK's encoder. Frame-by-frame models of the games' sound engines and of the audio microcodes play the files. A player of those models adds snapshots, mutes, meters and an enhanced mixing mode |
 | `ultralib::sequence_export_n64` | Conversion of the Nintendo 64's sound data to MIDI, SoundFont 2 and SFZ files, from a cartridge image or an Aleck64 game's ROM set. It links `ntdlib::sequence_export`, `ultralib::n64` and `ultralib::rom_set`. It builds only where xsflib builds `xsflib::rom_set`, with zlib |
 
-`ultralib::testing` holds the builders of small MIPS programs for the core's unit tests. It links `xsflib::testing`.
+`ultralib::testing` contains the builders of small MIPS programs for the core's unit tests. It links `xsflib::testing`.
 
 ## The emulator core
 
@@ -26,9 +26,10 @@ and seqlib. ultralib's modules are static libraries. A project links the modules
 - the RSP: the scalar unit, the vector unit with its accumulators, flags and divider, and its DMA engine
 - the interfaces of the RCP: MI, SP, DP, VI, AI, PI, SI, RI and the registers of the RDRAM chips. The RDP doesn't
   draw. The DP walks its command lists and raises its interrupt at each full sync. The VI is only a clock.
-- the Aleck64 board: 8 MiB of RDRAM, the CIC-NUS-5101, the DIP switches and controls, the coin, service, test and
-  start inputs, and a mahjong panel. The video chip of the E90 main board takes writes and reads 0.
-- the PIF RAM and its joybus commands. By default no device answers, as in older emulators of the console. A program may
+- the Aleck64 board: 8 MiB of board RAM, the CIC-NUS-5101, the DIP switches and controls, the coin, service, test and
+  start inputs, and a mahjong panel. On the E90 main board, the video chip's list of tiles and palette are memory, and
+  its registers read 0. The chip draws nothing.
+- the PIF RAM and its joybus commands. As in older emulators of the console, no device answers by default. A program may
   connect a standard controller to each port, with scripted input, and an EEPROM of 4 or 16 Kbit to the cartridge.
 - boot: the state that the boot code of the PIF leaves for the IPL3 of the cartridge. The IPL3 then runs as on the
   hardware.
@@ -49,7 +50,8 @@ task that runs at once in the legacy timing.
 
 ultralib requires CMake 3.20 or later, a C++20 compiler and ntdlib. ntdlib is a Git submodule at `externals/ntdlib`.
 Clone with `git clone --recurse-submodules`, or run `git submodule update --init --recursive` in an existing clone.
-The ntdlib submodule holds xsflib as a submodule, and xsflib holds seqlib. A build of the core alone uses only xsflib.
+The ntdlib submodule contains xsflib as a submodule, and xsflib contains seqlib. A build of the core alone uses only
+xsflib.
 
 ultralib supports macOS on Apple Silicon and Windows x64 built with clang-cl. Other platforms and compilers aren't
 supported.
@@ -106,8 +108,8 @@ each verdict.
 
 Each module is a static library with an alias, such as `ultralib::machine`. A project links the modules it uses.
 
-A project that uses ultralib adds xsflib first, and ntdlib too for the sound modules. ultralib then uses those copies.
-The copies in ultralib's submodule go unused.
+A project that uses ultralib adds xsflib first, and ntdlib too for the sound modules. ultralib then uses those copies
+and ignores the copies in its submodule.
 
 As Git submodules, for the core alone:
 
@@ -133,7 +135,7 @@ From installed copies (`cmake --install build` after configuring each library wi
 xsflib and ntdlib installed first:
 
 ```cmake
-find_package(ultralib 1.0 REQUIRED)
+find_package(ultralib 2.0 REQUIRED)
 target_link_libraries(my_program PRIVATE ultralib::machine)
 ```
 

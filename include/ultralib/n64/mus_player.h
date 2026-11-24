@@ -16,7 +16,6 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -116,6 +115,103 @@ struct MusNoteStart
     uint64_t time = 0; // the channel's clock, in 1/256 ticks
 };
 
+// A loop that a channel's command "for" opened: the place of the loop's first command, the places in the volume and
+// bend lists, and the values that each pass starts from.
+struct MusOpenFor
+{
+    uint32_t place = 0;
+    uint32_t volume_place = 0;
+    uint32_t bend_place = 0;
+    uint16_t volume_repeat = 0;
+    uint16_t bend_repeat = 0;
+    uint8_t count = 0;
+    uint8_t volume = 0;
+    uint8_t bend = 0;
+};
+
+// The state of a channel that both players keep: its places in the song and in its lists, its timing, its note and
+// envelope, and the settings that the commands of both forms set.
+struct MusChannel
+{
+    static constexpr int kForDepth = 4; // the loops that a channel can have open at once
+
+    uint64_t time = 0;
+    uint64_t volume_time = 0;
+    uint64_t bend_time = 0;
+    uint64_t next_event = 0;
+    uint64_t note_start = 0;
+    uint64_t note_off = 0;
+    uint64_t sweep_time = 0;
+    uint32_t pc = 0;
+    uint32_t volume_list = 0;
+    uint32_t bend_list = 0;
+    uint32_t data_base = 0;
+    uint32_t volume_base = 0;
+    uint32_t bend_base = 0;
+    uint32_t drums = 0;
+    const MusSong* song = nullptr;
+    MusSoundBank bank;
+    float vibrato_depth = 0.0F;
+    float bend = 0.0F;
+    float last_pitch = 99.9F;
+    float note_pitch = 0.0F;
+    float distort = 0.0F;
+    float distort_amount = 0.0F;
+    float portamento_start = 0.0F;
+    float portamento_now = 0.0F;
+    float attack_step = 1.0F;
+    float vibrato = 0.0F;
+    float bend_range = 1.0F / 32.0F;
+    float bend_value = 0.0F;
+    uint16_t tempo_scale = 128;
+    uint16_t length = 1;
+    uint16_t tempo = 0;
+    uint16_t base_tempo = 0;
+    int16_t velocity_scale = 128;
+    int16_t pan_scale = 128;
+    uint16_t last_volume = 0xFFFF;
+    uint16_t volume_repeat = 1;
+    uint16_t bend_repeat = 1;
+    uint16_t ticks = 0;
+    uint16_t fixed_length = 0;
+    uint16_t wave_number = 0;
+    uint16_t cutoff = 0;
+    uint16_t end_it = 0;
+    uint8_t vibrato_delay = 0;
+    uint8_t vibrato_speed = 0;
+    uint8_t portamento = 0;
+    int8_t transpose = 0;
+    uint8_t velocity = 0;
+    uint8_t volume = 127;
+    uint8_t pan = 64;
+    uint8_t last_pan = 255;
+    uint8_t envelope_first = 0;
+    uint8_t envelope_peak = 127;
+    uint8_t envelope_sustain = 127;
+    uint8_t envelope_phase = 0;
+    uint8_t envelope_value = 0;
+    uint8_t attack = 1;
+    uint8_t decay = 255;
+    uint8_t reverb = 0;
+    uint8_t reverb_base = 0;
+    uint8_t last_reverb = 255;
+    uint8_t wobble_on = 0;
+    uint8_t wobble_off = 0;
+    uint8_t wobble_count = 0;
+    int8_t wobble_value = 0;
+    int8_t wobble_amount = 0;
+    uint8_t default_velocity = 127;
+    uint8_t sweep = 0;
+    uint8_t sweep_step = 0;
+    uint8_t sweep_down = 0;
+    uint8_t for_depth = 0;
+    bool ignore_length = false;
+    bool ignore_transpose = false;
+    bool velocity_on = false;
+    bool playing = false;
+    std::array<MusOpenFor, kForDepth> fors = {};
+};
+
 class MusPlayer
 {
 public:
@@ -149,107 +245,20 @@ private:
     // The tools that check the model against a game run read and set the state below through ModelAccess.
     friend struct ModelAccess;
 
-    static constexpr int kForDepth = 4;
     static constexpr int kNoVoice = -1;
     static constexpr int kNoWave = -1;
 
-    struct OpenFor
+    // A channel, with the state that only the early player keeps.
+    struct Channel : MusChannel
     {
-        uint32_t place = 0;
-        uint32_t volume_place = 0;
-        uint32_t bend_place = 0;
-        uint16_t volume_repeat = 0;
-        uint16_t bend_repeat = 0;
-        uint8_t count = 0;
-        uint8_t volume = 0;
-        uint8_t bend = 0;
-    };
-
-    struct Channel
-    {
-        uint64_t time = 0;
-        uint64_t volume_time = 0;
-        uint64_t bend_time = 0;
-        uint64_t next_event = 0;
-        uint64_t note_start = 0;
-        uint64_t note_off = 0;
-        uint64_t sweep_time = 0;
-        uint32_t pc = 0;
-        uint32_t volume_list = 0;
-        uint32_t bend_list = 0;
-        uint32_t data_base = 0;
-        uint32_t volume_base = 0;
-        uint32_t bend_base = 0;
-        uint32_t drums = 0;
         int wave = kNoWave;
         int voice = kNoVoice;
-        const MusSong* song = nullptr;
-        MusSoundBank bank;
         int32_t fade = -1;
         int32_t fade_total = 1;
         int32_t priority = 0;
-        float vibrato_depth = 0.0F;
-        float bend = 0.0F;
-        float last_pitch = 99.9F;
-        float note_pitch = 0.0F;
-        float distort = 0.0F;
-        float distort_amount = 0.0F;
-        float portamento_start = 0.0F;
-        float portamento_now = 0.0F;
-        float attack_step = 1.0F;
         float decay_step = 0.0F;
-        float vibrato = 0.0F;
-        float bend_range = 1.0F / 32.0F;
-        float bend_value = 0.0F;
-        uint16_t tempo_scale = 128;
-        uint16_t length = 1;
-        uint16_t tempo = 0;
-        uint16_t base_tempo = 0;
-        int16_t velocity_scale = 128;
-        int16_t pan_scale = 128;
-        uint16_t last_volume = 0xFFFF;
-        uint16_t volume_repeat = 1;
-        uint16_t bend_repeat = 1;
         uint16_t handle = 0;
-        uint16_t ticks = 0;
-        uint16_t fixed_length = 0;
-        uint16_t wave_number = 0;
-        uint16_t cutoff = 0;
-        uint16_t end_it = 0;
-        uint8_t vibrato_delay = 0;
-        uint8_t vibrato_speed = 0;
-        uint8_t portamento = 0;
-        int8_t transpose = 0;
-        uint8_t velocity = 0;
-        uint8_t volume = 127;
-        uint8_t pan = 64;
-        uint8_t last_pan = 255;
-        uint8_t envelope_first = 0;
-        uint8_t envelope_peak = 127;
-        uint8_t envelope_sustain = 127;
-        uint8_t envelope_phase = 0;
-        uint8_t envelope_value = 0;
-        uint8_t attack = 1;
-        uint8_t decay = 255;
         uint8_t release = 1;
-        uint8_t reverb = 0;
-        uint8_t reverb_base = 0;
-        uint8_t last_reverb = 255;
-        uint8_t wobble_on = 0;
-        uint8_t wobble_off = 0;
-        uint8_t wobble_count = 0;
-        int8_t wobble_value = 0;
-        int8_t wobble_amount = 0;
-        uint8_t default_velocity = 127;
-        uint8_t sweep = 0;
-        uint8_t sweep_step = 0;
-        uint8_t sweep_down = 0;
-        uint8_t for_depth = 0;
-        bool ignore_length = false;
-        bool ignore_transpose = false;
-        bool velocity_on = false;
-        bool playing = false;
-        std::array<OpenFor, kForDepth> fors = {};
     };
 
     struct VoiceState
@@ -273,26 +282,18 @@ private:
     void InitChannel(Channel& channel) const;
     void StartPending(const PendingSong& pending);
     void Step(Channel& channel, int index);
-    uint32_t RunCommands(Channel& channel);
     void EndNote(Channel& channel);
     uint32_t RunCommand(Channel& channel, uint8_t command, uint32_t place);
     void SetEnvelope(Channel& channel, uint32_t place);
     void SetTempo(Channel& channel, uint8_t value);
     void NoteTimes(Channel& channel) const;
     void RunEnvelope(Channel& channel);
-    void ReadVolume(Channel& channel) const;
-    void ReadBend(Channel& channel) const;
     void RunSweep(Channel& channel) const;
     float Vibrato(Channel& channel) const;
-    static float Wobble(Channel& channel);
     float Pitch(Channel& channel, float offset) const;
     uint32_t VoiceVolume(const Channel& channel) const;
-    int Random(int range);
     void ExpireVoices();
     void ReleaseChannelVoice(Channel& channel);
-    AlWave WaveOf(const Channel& channel) const;
-    uint8_t ByteAt(const Channel& channel, uint32_t place) const;
-    uint32_t Sized(const Channel& channel, uint32_t& place) const;
 
     MusPlayerConfig config_;
     AlSynth* synth_ = nullptr;
@@ -334,8 +335,8 @@ struct MusLatePlayerConfig
 class MusLatePlayer
 {
 public:
-    // Takes a physical voice for each channel, as the game's player does. With fewer physical voices than channels, the
-    // later channels take the voices of the earlier ones.
+    // Takes a physical voice for each channel. The game's player does the same. With fewer physical voices than
+    // channels, the later channels take the voices of the earlier ones.
     MusLatePlayer(const MusLatePlayerConfig& config, AlSynth& synth);
 
     // Starts a song. Its channels first run in the next frame.
@@ -364,123 +365,32 @@ private:
     friend struct ModelAccess;
 
     static constexpr int kMasterChannels = 4;
-    static constexpr int kForDepth = 4;
     static constexpr int kNoWave = -1;
 
-    struct OpenFor
+    // A channel, with the state that only the later player keeps.
+    struct Channel : MusChannel
     {
-        uint32_t place = 0;
-        uint32_t volume_place = 0;
-        uint32_t bend_place = 0;
-        uint16_t volume_repeat = 0;
-        uint16_t bend_repeat = 0;
-        uint8_t count = 0;
-        uint8_t volume = 0;
-        uint8_t bend = 0;
-    };
-
-    struct Channel
-    {
-        uint64_t time = 0;
-        uint64_t volume_time = 0;
-        uint64_t bend_time = 0;
-        uint64_t next_event = 0;
-        uint64_t note_start = 0;
-        uint64_t note_off = 0;
-        uint64_t sweep_time = 0;
-        uint32_t pc = 0;
-        uint32_t volume_list = 0;
-        uint32_t bend_list = 0;
-        uint32_t data_base = 0;
-        uint32_t volume_base = 0;
-        uint32_t bend_base = 0;
-        uint32_t drums = 0;
         uint32_t handle = 0;
         uint32_t envelope_speed_factor = 1024;
         int pending_wave = kNoWave;
-        const MusSong* song = nullptr;
-        MusSoundBank bank;
-        float vibrato_depth = 0.0F;
         float vibrato_step = 0.0F;
-        float vibrato = 0.0F;
-        float distort = 0.0F;
-        float distort_amount = 0.0F;
-        float bend = 0.0F;
-        float bend_range = 1.0F / 32.0F;
-        float bend_value = 0.0F;
-        float last_pitch = 99.9F;
-        float note_pitch = 0.0F;
-        float portamento_start = 0.0F;
-        float portamento_now = 0.0F;
-        float attack_step = 1.0F;
         float decay_step = 1.0F / 255.0F;
         float release_step = 1.0F / 15.0F;
-        uint16_t tempo_scale = 128;
-        uint16_t length = 1;
-        uint16_t tempo = 0;
-        uint16_t base_tempo = 0;
-        int16_t velocity_scale = 128;
-        int16_t pan_scale = 128;
-        uint16_t last_volume = 0xFFFF;
-        uint16_t volume_repeat = 1;
-        uint16_t bend_repeat = 1;
-        uint16_t ticks = 0;
-        uint16_t fixed_length = 0;
-        uint16_t wave_number = 0;
-        uint16_t cutoff = 0;
-        uint16_t end_it = 0;
-        uint8_t vibrato_delay = 0;
-        uint8_t vibrato_speed = 0;
-        uint8_t portamento = 0;
-        int8_t transpose = 0;
-        uint8_t velocity = 0;
-        uint8_t volume = 127;
-        uint8_t pan = 64;
-        uint8_t last_pan = 255;
         uint8_t envelope_speed = 1;
-        uint8_t envelope_first = 0;
-        uint8_t envelope_peak = 127;
-        uint8_t envelope_sustain = 127;
-        uint8_t envelope_phase = 0;
-        uint8_t envelope_value = 0;
         uint8_t envelope_count = 0;
         uint8_t release_from = 0;
-        uint8_t attack = 1;
-        uint8_t decay = 255;
         uint8_t release = 15;
-        uint8_t reverb = 0;
-        uint8_t reverb_base = 0;
-        uint8_t last_reverb = 255;
-        uint8_t wobble_on = 0;
-        uint8_t wobble_off = 0;
-        uint8_t wobble_count = 0;
-        int8_t wobble_value = 0;
-        int8_t wobble_amount = 0;
-        uint8_t default_velocity = 127;
-        uint8_t sweep = 0;
-        uint8_t sweep_step = 0;
-        uint8_t sweep_down = 0;
-        uint8_t for_depth = 0;
         bool paused = false;
-        bool ignore_length = false;
-        bool ignore_transpose = false;
-        bool velocity_on = false;
         bool keep_note_times = false;
         bool keep_wave = false;
-        bool playing = false;
-        std::array<OpenFor, kForDepth> fors = {};
     };
 
     void InitChannel(Channel& channel) const;
     int FindChannel(const MusSong& song, int number) const;
-    uint8_t ByteAt(const Channel& channel, uint32_t place) const;
-    uint32_t Sized(const Channel& channel, uint32_t& place) const;
     void SetEnvelope(Channel& channel, uint32_t place) const;
     void SetTempo(Channel& channel, uint8_t value);
-    int Random(int range);
     uint32_t RunCommand(Channel& channel, uint8_t command, uint32_t place);
     void Step(Channel& channel, int index);
-    uint32_t RunCommands(Channel& channel);
     static void ReleaseForRest(Channel& channel);
     void ReadVelocity(Channel& channel, uint8_t note) const;
     void ReadLength(Channel& channel) const;
@@ -491,12 +401,9 @@ private:
     void SendReverb(Channel& channel, int voice);
     void StartWave(Channel& channel, int voice);
     void RunChannel(Channel& channel, int index);
-    void ReadVolume(Channel& channel) const;
-    void ReadBend(Channel& channel) const;
     static int32_t EnvelopeTicks(const Channel& channel, uint64_t from, uint32_t less);
     void RunEnvelope(Channel& channel) const;
     static void RunSweep(Channel& channel);
-    static float Wobble(Channel& channel);
     float Vibrato(Channel& channel) const;
     void SendVolumeAndPan(Channel& channel, int voice);
     void SendPitch(Channel& channel, int voice, float offset);

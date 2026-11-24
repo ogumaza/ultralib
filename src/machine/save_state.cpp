@@ -83,8 +83,9 @@ private:
     const uint8_t* data_;
 };
 
-// The FPU's registers in the state. With FR set, slot n holds register n. With FR clear, slot k holds even register 2k,
-// whose halves are the singles 2k and 2k + 1, and slots 16 to 31 are zero. The odd physical registers aren't kept.
+// The FPU's registers in the state. With FR set, slot n holds register n. With FR clear, slot k holds even register 2k.
+// The halves of that register are the singles 2k and 2k + 1. Slots 16 to 31 are zero, and the odd physical registers
+// aren't kept.
 std::array<uint64_t, 32> FprToSlots(const std::array<uint64_t, 32>& fpr, bool fr)
 {
     if (fr)
@@ -135,7 +136,7 @@ std::vector<uint8_t> System::SaveState() const
     }
     CopyToLeWords(header.data(), p + kOffsetRomHeader, header.size());
 
-    // The VI timer counts in Count's units, which are two ticks.
+    // The VI timer counts in Count's units. Each unit is two ticks.
     const uint64_t next_vi = events_[static_cast<int>(Event::kVi)];
     out.Put32(kOffsetViTimer, next_vi == kNever || next_vi < now_ ? 0 : static_cast<uint32_t>((next_vi - now_) / 2));
 
@@ -326,7 +327,7 @@ void System::LoadCpu(const uint8_t* state)
 {
     const StateReader in(state);
 
-    // The CPU. 32-bit COP0 values are sign-extended, as MTC0 would write them.
+    // The CPU. 32-bit COP0 values are sign-extended the way MTC0 would write them.
     CpuState cpu;
     cpu.pc = SignExtend32(in.Get32(kOffsetPc));
     std::array<uint64_t, 32> slots{};
@@ -366,7 +367,7 @@ void System::LoadRcp(const uint8_t* state)
 {
     const StateReader in(state);
 
-    // A state comes from a running program, so IPL3 has set the chips up as plain memory. Reset() has left them that
+    // A state comes from a running program. IPL3 has set the chips up as plain memory. Reset() has left them that
     // way. The loop below reads their registers from the state.
     for (RdramChip& chip : rdram_chips_)
     {
@@ -434,9 +435,9 @@ void System::LoadRcp(const uint8_t* state)
         StartVi();
     }
 
-    // AI_STATUS starts clear. With the AI's delay, a non-zero AI_LEN describes a buffer that plays from now on, whose
-    // samples have already been taken. AI_LEN reads 0 while it plays. Without the delay, the legacy players start
-    // nothing.
+    // AI_STATUS starts clear. With the AI's delay, a non-zero AI_LEN describes a buffer that plays from now on. The AI
+    // has already taken the samples of that buffer. AI_LEN reads 0 while it plays. Without the delay, the legacy
+    // players start nothing.
     ai_.dram_address = in.Get32(kOffsetAi);
     ai_.control = in.Get32(kOffsetAi + 8) & kAiControlDma;
     ai_.dac_rate = in.Get32(kOffsetAi + 16) & kAiDacRateMask;

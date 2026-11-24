@@ -5,16 +5,15 @@
 // for byte. The expected events and samples were worked out by hand from the same layouts.
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <span>
 #include <vector>
 
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/bank_file.h"
 #include "ultralib/n64/midi.h"
 #include "ultralib/n64/seq_file.h"
@@ -26,28 +25,16 @@ namespace
 {
 
 namespace n64 = ultralib::n64;
-using Bytes = std::vector<uint8_t>;
-
-void Put16(Bytes& bytes, uint16_t value)
-{
-    bytes.push_back(static_cast<uint8_t>(value >> 8));
-    bytes.push_back(static_cast<uint8_t>(value));
-}
-
-void Put32(Bytes& bytes, uint32_t value)
-{
-    Put16(bytes, static_cast<uint16_t>(value >> 16));
-    Put16(bytes, static_cast<uint16_t>(value));
-}
+using ultralib::testing::Bytes;
 
 void TestSeqFile()
 {
     // Two sequences with stale bytes between them, and bytes after the last one that belong to something else.
     Bytes file = {'S', '1', 0, 2};
-    Put32(file, 20);
-    Put32(file, 2);
-    Put32(file, 24);
-    Put32(file, 3);
+    xsflib::AppendBe32(file, 20);
+    xsflib::AppendBe32(file, 2);
+    xsflib::AppendBe32(file, 24);
+    xsflib::AppendBe32(file, 3);
     file.insert(file.end(), {0xA1, 0xA2, 0xEE, 0xEF, 0xB1, 0xB2, 0xB3});
     Bytes data = file;
     data.push_back(0x55);
@@ -86,22 +73,22 @@ void TestSeqFile()
 void TestHudsonRecords()
 {
     Bytes file = {'S', '2', 0, 2};
-    Put32(file, 0x38);
-    Put32(file, 2);
-    Put32(file, 0x3C);
-    Put32(file, 3);
+    xsflib::AppendBe32(file, 0x38);
+    xsflib::AppendBe32(file, 2);
+    xsflib::AppendBe32(file, 0x3C);
+    xsflib::AppendBe32(file, 3);
 
     for (const uint8_t bank : {uint8_t{0x00}, uint8_t{0x15}})
     {
         file.push_back(bank);
         file.push_back(static_cast<uint8_t>(0x7D - bank));
-        Put16(file, 0xFFFF);
-        Put32(file, 0x40);
-        Put32(file, 0x1234);
-        Put32(file, 0x5678);
+        xsflib::AppendBe16(file, 0xFFFF);
+        xsflib::AppendBe32(file, 0x40);
+        xsflib::AppendBe32(file, 0x1234);
+        xsflib::AppendBe32(file, 0x5678);
     }
 
-    Put32(file, 0xFFFFFFFF);
+    xsflib::AppendBe32(file, 0xFFFFFFFF);
     file.insert(file.end(), {0xA1, 0xA2, 0xEE, 0xEF, 0xB1, 0xB2, 0xB3});
 
     const std::vector<n64::HudsonSongRecord> records = n64::ReadHudsonRecords(file);
@@ -131,66 +118,66 @@ void TestHudsonRecords()
 Bytes BankBytes()
 {
     Bytes file = {'B', '1', 0, 1};
-    Put32(file, 0x10);
-    Put32(file, 0xCAFEF00D); // not in any object
+    xsflib::AppendBe32(file, 0x10);
+    xsflib::AppendBe32(file, 0xCAFEF00D); // not in any object
     file.resize(0x10, 0);
 
     // 0x10: the bank. Offsets: percussion 0x28, program 0 at 0x28, program 1 empty.
-    Put16(file, 2);
+    xsflib::AppendBe16(file, 2);
     file.push_back(0);
     file.push_back(0);
-    Put32(file, 22050);
-    Put32(file, 0x28);
-    Put32(file, 0x28);
-    Put32(file, 0);
+    xsflib::AppendBe32(file, 22050);
+    xsflib::AppendBe32(file, 0x28);
+    xsflib::AppendBe32(file, 0x28);
+    xsflib::AppendBe32(file, 0);
     file.resize(0x28, 0);
 
     // 0x28: the instrument with one sound.
     file.insert(file.end(), {100, 64, 5, 0, 1, 2, 3, 4, 5, 6, 7, 8});
-    Put16(file, 200);
-    Put16(file, 1);
-    Put32(file, 0x40);
+    xsflib::AppendBe16(file, 200);
+    xsflib::AppendBe16(file, 1);
+    xsflib::AppendBe32(file, 0x40);
     file.resize(0x40, 0);
 
     // 0x40: the sound.
-    Put32(file, 0x50);
-    Put32(file, 0x60);
-    Put32(file, 0x68);
+    xsflib::AppendBe32(file, 0x50);
+    xsflib::AppendBe32(file, 0x60);
+    xsflib::AppendBe32(file, 0x68);
     file.insert(file.end(), {32, 96, 0, 0});
 
     // 0x50: the envelope.
-    Put32(file, 1000);
-    Put32(file, 2000);
-    Put32(file, static_cast<uint32_t>(-1));
+    xsflib::AppendBe32(file, 1000);
+    xsflib::AppendBe32(file, 2000);
+    xsflib::AppendBe32(file, static_cast<uint32_t>(-1));
     file.insert(file.end(), {127, 80, 0, 0});
 
     // 0x60: the key map, then two bytes of padding that aren't zero.
     file.insert(file.end(), {0, 127, 21, 108, 60, static_cast<uint8_t>(-5), 0xAB, 0xCD});
 
     // 0x68: the wave. Base and length in the .tbl, a VADPCM type, a loop and a book.
-    Put32(file, 0x1234);
-    Put32(file, 900);
+    xsflib::AppendBe32(file, 0x1234);
+    xsflib::AppendBe32(file, 900);
     file.insert(file.end(), {0, 0, 0, 0});
-    Put32(file, 0x80);
-    Put32(file, 0xB0);
+    xsflib::AppendBe32(file, 0x80);
+    xsflib::AppendBe32(file, 0xB0);
     file.resize(0x80, 0);
 
     // 0x80: the loop with its state, then padding.
-    Put32(file, 16);
-    Put32(file, 1600);
-    Put32(file, 0xFFFFFFFF);
+    xsflib::AppendBe32(file, 16);
+    xsflib::AppendBe32(file, 1600);
+    xsflib::AppendBe32(file, 0xFFFFFFFF);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(file, static_cast<uint16_t>(i * 3));
+        xsflib::AppendBe16(file, static_cast<uint16_t>(i * 3));
     }
     file.resize(0xB0, 0);
 
     // 0xB0: the book. Order 2 and one predictor.
-    Put32(file, 2);
-    Put32(file, 1);
+    xsflib::AppendBe32(file, 2);
+    xsflib::AppendBe32(file, 1);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(file, static_cast<uint16_t>(i + 1));
+        xsflib::AppendBe16(file, static_cast<uint16_t>(i + 1));
     }
 
     return file;
@@ -269,19 +256,19 @@ void TestBankFile()
 Bytes CompressedBytes()
 {
     Bytes file;
-    Put32(file, 68); // track 0
+    xsflib::AppendBe32(file, 68); // track 0
     for (int i = 1; i < 16; i++)
     {
-        Put32(file, 0);
+        xsflib::AppendBe32(file, 0);
     }
-    Put32(file, 48);
+    xsflib::AppendBe32(file, 48);
 
     const Bytes track = {
         0x00, 0xFF, 0x51, 0x07, 0xA1, 0x20, // 68: a tempo of 500,000 microseconds
         0x00, 0xFF, 0x2E, 0x00, 0xFF,       // 74: a loop start
         0x00, 0x90, 0x40, 0x7F, 0x18,       // 79: note 0x40, velocity 0x7F, duration 24
         0x18, 0x41, 0x7F, 0x18,             // 84: a running status: note 0x41 after 24 ticks
-        0xFE, 0x00, 0x09, 0x08,             // 88: a block of the 8 bytes at 79, which ends with note 0x41's velocity
+        0xFE, 0x00, 0x09, 0x08,             // 88: a block of the 8 bytes at 79, up to note 0x41's velocity
         0x18,                               // 92: that note's duration
         0xFE, 0xFE, 0x01,                   // 93: a delta of 0xFE 0x01
         0x42, 0x60, 0x0C,                   // 96: a running status: note 0x42, duration 12
@@ -409,8 +396,8 @@ void TestCompressedBuild()
     XSFLIB_CHECK(decoded == track);
 }
 
-// Build looks for blocks in the tracks only. The header's track offsets change after the first track goes out, so a
-// block that copied them would come back wrong. The first track holds runs of zeros, as the header does.
+// Build looks for blocks in the tracks only. The header's track offsets change after the first track goes out. A
+// block that copied them would come back wrong. The first track contains runs of zeros, and the header does too.
 void TestCompressedBuildSkipsHeader()
 {
     std::vector<n64::MidiEvent> track;
@@ -427,7 +414,7 @@ void TestCompressedBuildSkipsHeader()
     finish.type = n64::kMidiMetaEndOfTrack;
     track.push_back(finish);
 
-    // The other tracks hold only their ends, so that every offset in the header changes.
+    // The other tracks contain only their ends. Every offset in the header then changes.
     std::vector<std::vector<n64::MidiEvent>> tracks(n64::CompressedMidi::kTrackCount, {finish});
     tracks[0] = track;
     const n64::CompressedMidi built = n64::CompressedMidi::Build(tracks, 48);
@@ -447,7 +434,7 @@ void TestCompressedLoopOffsets()
         track.push_back(start);
         for (int i = 0; i < notes; i++)
         {
-            // Values that don't repeat in the same order, which keeps blocks out.
+            // Values that don't repeat in the same order keep blocks out.
             n64::MidiEvent event;
             event.delta = 1;
             event.status = 0xB0;
@@ -485,12 +472,12 @@ void TestCompressedLoopOffsets()
 void TestCompressedLoopEndBytes()
 {
     Bytes file;
-    Put32(file, 68);
+    xsflib::AppendBe32(file, 68);
     for (int i = 1; i < 16; i++)
     {
-        Put32(file, 0);
+        xsflib::AppendBe32(file, 0);
     }
-    Put32(file, 48);
+    xsflib::AppendBe32(file, 48);
 
     // 68: a loop start. 73: 60 controllers and a note, 245 bytes. 318: a loop end that leads back 0xFE bytes from 327.
     file.insert(file.end(), {0x00, 0xFF, 0x2E, 0x00, 0xFF});
@@ -519,12 +506,12 @@ void TestCompressedLoopEndBytes()
 void TestCompressedLoopEndInBlock()
 {
     Bytes file;
-    Put32(file, 68);
+    xsflib::AppendBe32(file, 68);
     for (int i = 1; i < 16; i++)
     {
-        Put32(file, 0);
+        xsflib::AppendBe32(file, 0);
     }
-    Put32(file, 48);
+    xsflib::AppendBe32(file, 48);
 
     const Bytes track = {
         0x00, 0xFF, 0x2E, 0x00, 0xFF,                         // 68: a loop start
@@ -612,7 +599,7 @@ n64::VadpcmBook SimpleBook()
     book.coefficients[16 + 0] = 1024;
     book.coefficients[16 + 8] = 2048;
 
-    // Predictor 1's sample 1 takes the last sample. It also adds the first residual, as the second row's first value.
+    // Predictor 1's sample 1 takes the last sample. It also adds the first residual: the second row's first value.
     book.coefficients[16 + 9] = 2048;
 
     return book;

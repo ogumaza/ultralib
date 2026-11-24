@@ -8,12 +8,12 @@
 // - Each sequence player that's on adds its tempo to a counter. When the counter passes a limit, one tick runs: the
 //   sequence's script, each channel's script and each layer's script. A layer's note takes a voice from the lists that
 //   its channel's policy names.
-// - Each voice takes its envelope, vibrato and portamento. It then records its settings for that update.
+// - Each voice steps its envelope, vibrato and portamento. It then records its settings for that update.
 //
 // The engine then builds the commands of each update, from those records, for the update's share of the frame.
 //
-// The model holds its state in plain values and indices. The sound files stay outside it. A copy of the object is a
-// snapshot while the files live. A script may write to its sequence. Each player therefore holds a copy of the
+// The model keeps its state in plain values and indices. The sound files stay outside it. A copy of the object is a
+// snapshot while the files live. A script may write to its sequence. Each player therefore keeps a copy of the
 // sequence's bytes.
 //
 // A note's start reaches `on_note`, with the place of its command in the sequence.
@@ -32,9 +32,14 @@
 #include "ultralib/n64/audio_memory.h"
 #include "ultralib/n64/ead_bank.h"
 #include "ultralib/n64/ead_early.h"
+#include "ultralib/n64/ead_list_kind.h"
+#include "ultralib/n64/ead_reverb_item.h"
 
 namespace ultralib::n64
 {
+
+// The plan of a pass of the ADPCM decoder. Only the library's sources define it.
+struct EadAdpcmPass;
 
 // The later engine's files in an image.
 struct EadLaterFiles
@@ -42,7 +47,8 @@ struct EadLaterFiles
     // Reads the files that FindLaterSoundData finds. An image without them gives nothing.
     static std::optional<EadLaterFiles> Read(std::span<const uint8_t> image);
 
-    // A table's entry with no size names the entry that holds its data. These lists hold the data under both numbers.
+    // A table's entry with no size names the entry that contains its data. These lists hold the data under both
+    // numbers.
     std::vector<std::vector<uint8_t>> sequences;
     std::vector<EadBank> banks;
 
@@ -77,14 +83,14 @@ enum class EadLaterOutput : uint8_t
     kHeadset = 1,
     kSurround = 2,
     kMono = 3,
-    kSurroundEffects = 4, // Majora's Mask's form and later: halves each voice's targets, and adds a surround effect
+    kSurroundEffects = 4, // Majora's Mask and later: halves each voice's targets, and adds a surround effect
 };
 
 enum class EadLaterVersion : uint8_t
 {
     kOcarina,
     kMajora,
-    kStadium2, // Majora's Mask's form, with its differences: a layer's flags reach its sound, and the delay
+    kStadium2, // the form of Majora's Mask, with two differences: a layer's flags reach its sound, and the delay
                // kEnvelopeSkip
 };
 
@@ -104,12 +110,12 @@ class EadLaterPlayer
 public:
     static constexpr int kPlayers = 5;
     static constexpr int kChannelsPerPlayer = 16;
-    // A channel's layers. Pokémon Stadium 2's build holds 6. The others hold 4.
+    // A channel's layers. Pokémon Stadium 2's build has 6. The others have 4.
     static constexpr int kLayersPerChannel = 6;
     static constexpr int kPorts = 8;
 
-    // The files must outlive the player and its copies. The model takes its buffers from `memory`. `memory` holds the
-    // image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
+    // The files must outlive the player and its copies. The model allocates its buffers in `memory`. `memory` contains
+    // the image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
     EadLaterPlayer(const EadLaterConfig& config, const EadLaterFiles& files, AudioMemory& memory);
 
     // Starts a sequence on a player.
@@ -130,11 +136,11 @@ public:
     void SetChannelFrequency(int player, int channel, float scale);
     void SetChannelPan(int player, int channel, uint8_t pan);
 
-    // A script's input from the game. A script reads -1 from a port that holds nothing new.
+    // A script's input from the game. A script reads -1 from a port that contains nothing new.
     void WritePlayerPort(int player, int port, int8_t value);
     void WriteChannelPort(int player, int channel, int port, int8_t value);
 
-    // The value that a frame's scripts read as random. The engine takes it from the console's timer and output. A
+    // The value that a frame's scripts read as random. The engine derives it from the console's timer and output. A
     // comparison with a game has to feed the game's value. The model steps a simple generator without it.
     void SetRandom(uint32_t value);
 
@@ -164,7 +170,7 @@ private:
         int8_t value = 0;
     };
 
-    // An envelope lies in a bank, in a sequence's bytes, or in the engine.
+    // An envelope is in a bank, in a sequence's bytes, or in the engine.
     struct EnvelopeRef
     {
         const EadEnvelope* bank = nullptr;
@@ -468,14 +474,7 @@ private:
         VoiceBuffers buffers;
     };
 
-    struct ReverbItem
-    {
-        uint32_t downsample_left = 0;
-        uint32_t downsample_right = 0;
-        int32_t start = 0;
-        int16_t length_a = 0;
-        int16_t length_b = 0;
-    };
+    using ReverbItem = EadReverbItem;
 
     struct Reverb
     {
@@ -507,8 +506,8 @@ private:
         uint32_t filter_right_state = 0;
     };
 
-    // A load that a script started and that the engine runs a part of in each frame. The target's port takes the
-    // result.
+    // A load that a script started and that the engine runs a part of in each frame. The engine writes the result to
+    // the target's port.
     struct SlowLoad
     {
         bool active = false;
@@ -520,13 +519,8 @@ private:
         uint32_t copy_to = 0;
     };
 
-    enum ListKind : uint8_t
-    {
-        kDisabled = 0,
-        kDecaying = 1,
-        kReleasing = 2,
-        kActive = 3,
-    };
+    using ListKind = EadListKind;
+    using enum EadListKind;
 
     // The steps of the constructor.
     void SetRates(int frequency);
@@ -653,21 +647,7 @@ private:
         int written = 0;
     };
 
-    // One pass of the decoding of a part: the samples to skip in the first frame and those left in it, the frames and
-    // samples to decode, the samples after the end of the pass, and whether the pass reaches the loop or the end.
-    struct ChunkPlan
-    {
-        int ignored_first = 0;
-        int in_first = 0;
-        int frames = 0;
-        int to_decode = 0;
-        int trailing = 0;
-        bool restart = false;
-        bool note_finished = false;
-    };
-
     void RunFrameUpdates();
-    int UpdateLength(int remaining, int left) const;
     void EnsureBank(AudioMemory& memory, int font);
     void StartReverbItems(AudioMemory& memory, int length, int update, int reverb);
     void BuildUpdate(AudioList& list, AudioMemory& memory, uint32_t output, int length, int update);
@@ -681,11 +661,8 @@ private:
                                               uint32_t flags, bool finished, int to_load, int update);
     void LoadBook(AudioList& list, const UpdateState& state, const EadSample& sample, const EadBank& bank);
     void DecodePart(AudioList& list, int voice, const UpdateState& state, SampleDecode& decode, int update);
-    static ChunkPlan PlanChunk(int position, bool restarting, int until_end, int to_process, bool loops);
-    uint32_t LoadFrames(AudioList& list, const SampleDecode& decode, const Voice& voice, ChunkPlan& plan,
-                        int frame_size) const;
-    void DecodeFrames(AudioList& list, const UpdateState& state, SampleDecode& decode, Voice& voice, ChunkPlan& plan,
-                      int frame_size);
+    void DecodeFrames(AudioList& list, const UpdateState& state, SampleDecode& decode, Voice& voice,
+                      const EadAdpcmPass& pass, int frame_size);
     void DisableLaterUpdates(int voice, int update);
     void BuildResample(AudioList& list, const UpdateState& state, const Voice& voice, uint32_t before_resampling,
                        int length, uint32_t flags);

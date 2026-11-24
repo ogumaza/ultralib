@@ -4,8 +4,8 @@
 # "subdirectory" adds the source folder, "fetchcontent" declares it with FetchContent, and "find_package" finds an
 # installed copy. In the first two, the project adds xsflib and ntdlib from ultralib's submodule first. A project that
 # uses the three libraries does the same. To check a route, configure this folder with -DULTRALIB_ROUTE=<route>, build
-# it and run ctest. The check links the emulator core and the sound module, so ultralib has to be built with
-# ULTRALIB_SOUND. It links the ROM sets too where xsflib builds them. The first two routes build them with zlib.
+# it and run ctest. The check links the emulator core and the sound module. ultralib therefore has to be built with
+# ULTRALIB_SOUND. The check links the ROM sets too where xsflib builds them. The first two routes build them with zlib.
 cmake_minimum_required(VERSION 3.20)
 project(ultralib_package_test LANGUAGES C CXX)
 
@@ -28,7 +28,7 @@ elseif (ULTRALIB_ROUTE STREQUAL "fetchcontent")
     FetchContent_Declare(ultralib SOURCE_DIR ${ULTRALIB_SOURCE_DIR})
     FetchContent_MakeAvailable(xsflib ntdlib ultralib)
 elseif (ULTRALIB_ROUTE STREQUAL "find_package")
-    find_package(ultralib 1.0 REQUIRED)
+    find_package(ultralib 2.0 REQUIRED)
 else()
     message(FATAL_ERROR "ULTRALIB_ROUTE is ${ULTRALIB_ROUTE}: use subdirectory, fetchcontent or find_package")
 endif()

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 // The RSP's vector unit. Adapted from Iconoclast's RSP (mupen64plus-rsp-cxd4, the files vu/vu.c, vu/add.c,
-// vu/multiply.c, vu/select.c, vu/logical.c and vu/divide.c), which are dedicated to the public domain under CC0 1.0.
-// The divider's use of its table, the clamps and the clip compares follow that code. The table itself is computed from
-// the reciprocals and inverse square roots that it holds. The lanes and the accumulator are rewritten as plain arrays.
-// The opcodes that Iconoclast's RSP treats as reserved (VMULQ, VMACQ, VRNDP and VRNDN) follow the behaviour that the
-// hardware tests record. These changes are dedicated to the public domain under CC0 1.0 too.
+// vu/multiply.c, vu/select.c, vu/logical.c and vu/divide.c). Those files are dedicated to the public domain under CC0
+// 1.0. The divider's use of its table, the clamps and the clip compares follow that code. The table itself is computed
+// from the reciprocals and inverse square roots that it holds. The lanes and the accumulator are rewritten as plain
+// arrays. The opcodes that Iconoclast's RSP treats as reserved (VMULQ, VMACQ, VRNDP and VRNDN) follow the behaviour
+// that the hardware tests record. These changes are dedicated to the public domain under CC0 1.0 too.
 
 #include "ultralib/machine/rsp_vector.h"
 

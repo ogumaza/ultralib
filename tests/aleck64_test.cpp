@@ -124,8 +124,8 @@ void Console()
     XSFLIB_CHECK(system.BoardAccesses() == 1);
 }
 
-// A program that loads a word through a TLB entry that maps 0xE0000000 to the board's RAM, as the board's games map
-// their heap, and returns the loaded word.
+// A program that loads a word through a TLB entry that maps 0xE0000000 to the board's RAM, and returns the loaded word.
+// The board's games map their heap the same way.
 uint32_t LoadThroughTlb(System& system)
 {
     ultralib::machine::TlbEntry entry;

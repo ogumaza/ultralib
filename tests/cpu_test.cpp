@@ -3,8 +3,6 @@
 // Short programs on the CPU, with results that the VR4300's manual defines: sign extension of 32-bit results, unaligned
 // loads and stores, delay slots and the exception vector.
 
-#include <cstdint>
-
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 

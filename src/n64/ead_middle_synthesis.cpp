@@ -3,15 +3,21 @@
 // The audio lists in the model of the middle EAD engine, for EAD's microcode and for the standard one: the commands of
 // each update for the voices and the reverbs, and the frame that runs the updates.
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
 
+#include "ntdlib/rounding.h"
+
+#include "ead_adpcm_pass.h"
+#include "ead_common.h"
+#include "ead_constants.h"
 #include "ead_lists.h"
 #include "ead_middle_constants.h"
+#include "ead_reverb.h"
+#include "ead_standard_lists.h"
 #include "ultralib/n64/ead_middle.h"
 
 namespace ultralib::n64
@@ -20,9 +26,11 @@ namespace ultralib::n64
 namespace
 {
 
-using ead_lists::Align16;
-using ead_lists::Align8;
+using ead_constants::kFrameSamples;
+using ead_constants::kWaveSamples;
 using ead_lists::Clear;
+using ead_lists::FramesPlace;
+using ead_lists::Halve;
 using ead_lists::kFlagContinue;
 using ead_lists::kFlagInit;
 using ead_lists::kFlagLoop;
@@ -31,26 +39,23 @@ using ead_lists::kOpDuplicate;
 using ead_lists::kOpEnvMixer;
 using ead_lists::kOpEnvSetup1;
 using ead_lists::kOpEnvSetup2;
-using ead_lists::kOpHalve;
 using ead_lists::kOpInterleave;
 using ead_lists::kOpLoadBook;
 using ead_lists::kOpSegment;
 using ead_lists::kOpSetLoop;
 using ead_lists::Load;
+using ead_lists::LoadFrames;
 using ead_lists::Mix;
 using ead_lists::Move;
 using ead_lists::Pair;
-using ead_lists::ReadBe16;
 using ead_lists::Resample;
 using ead_lists::Save;
 using ead_lists::SetBuffer;
 using ead_lists::Word0;
-using ead_lists::WriteBe16;
 using ead_middle_constants::kOneChannel;
-using ead_middle_constants::kStdOneChannel;
-using ead_middle_constants::kStdTwoChannels;
 using ead_middle_constants::kTwoChannels;
-using ead_middle_constants::kWaveSamples;
+
+namespace standard = ead_standard_dmem;
 
 // The places in the RSP's memory that the engine's commands name.
 constexpr uint32_t kDmemTemp = 0x000;
@@ -63,22 +68,11 @@ constexpr uint32_t kDmemRight = 0x6C0;
 constexpr uint32_t kDmemWetLeft = 0x840;
 constexpr uint32_t kDmemWetRight = 0x9C0;
 
-// The same places in the lists for the standard microcode.
-constexpr uint32_t kStdResampled = 0x020;
-constexpr uint32_t kStdResampled2 = 0x160;
-constexpr uint32_t kStdDecoded = 0x180;
-constexpr uint32_t kStdPanTemp = 0x200;
-constexpr uint32_t kStdStrongDry = 0x200;
-constexpr uint32_t kStdStrongWet = 0x340;
-constexpr uint32_t kStdCompressed = 0x3F0;
-constexpr uint32_t kStdLeft = 0x4C0;
-constexpr uint32_t kStdRight = 0x600;
-constexpr uint32_t kStdWetLeft = 0x740;
-constexpr uint32_t kStdWetRight = 0x880;
+// The bytes of an ADPCM frame.
+constexpr int kFrameSize = 9;
 
-constexpr int kFrameSamples = 16;
-
-// The k-th root of `value`, for k from 9 to 24, by Newton's method from 1.5, as the code at 0x800B7378 in Wave Race 64.
+// The k-th root of `value`, for k from 9 to 24, by Newton's method from 1.5. The code at 0x800B7378 in Wave Race 64
+// computes it this way.
 double KthRoot(double value, int k)
 {
     constexpr double kClose = 1e-07;
@@ -114,6 +108,7 @@ double KthRoot(double value, int k)
         const double next = root - (power * root - value) / (k * power);
         const double change = std::abs(next - root);
         root = next;
+
         if (change < kClose)
         {
             break;
@@ -123,73 +118,6 @@ double KthRoot(double value, int k)
     return root;
 }
 
-void Halve(AudioList& list, uint32_t count, uint32_t in, uint32_t out)
-{
-    list.commands.push_back({(kOpHalve << 24) | (count & 0xFFFF), Pair(in, out)});
-}
-
-// The ADPCM frames of the next chunk of a part: the samples that the first frame skips and contains, the frames to
-// load, the samples to decode and the samples past the end of the part.
-struct ChunkPlan
-{
-    int ignored_first = 0;
-    int in_first = 0;
-    int frames = 0;
-    int to_decode = 0;
-    int trailing = 0;
-    bool restart = false;
-    bool note_finished = false;
-};
-
-// Plans the next chunk of `to_process` samples from `position`. A chunk that reaches `end_position` ends there. Such a
-// chunk restarts a sample that loops and finishes the note of any other sample.
-ChunkPlan PlanChunk(int32_t position, bool restarted, int32_t end_position, int to_process, bool loops)
-{
-    ChunkPlan chunk;
-    chunk.ignored_first = position & 0xF;
-    const int until_end = end_position - position;
-    if (chunk.ignored_first == 0 && !restarted)
-    {
-        chunk.ignored_first = kFrameSamples;
-    }
-
-    chunk.in_first = kFrameSamples - chunk.ignored_first;
-    if (to_process < until_end)
-    {
-        chunk.frames = (to_process - chunk.in_first + kFrameSamples - 1) / kFrameSamples;
-        chunk.to_decode = chunk.frames * kFrameSamples;
-        chunk.trailing = chunk.in_first + chunk.to_decode - to_process;
-    }
-    else
-    {
-        chunk.to_decode = until_end - chunk.in_first;
-        chunk.trailing = 0;
-        if (chunk.to_decode <= 0)
-        {
-            chunk.to_decode = 0;
-            chunk.in_first = until_end;
-        }
-
-        chunk.frames = (chunk.to_decode + kFrameSamples - 1) / kFrameSamples;
-        if (loops)
-        {
-            chunk.restart = true;
-        }
-        else
-        {
-            chunk.note_finished = true;
-        }
-    }
-
-    // A chunk with no frames decodes nothing.
-    if (chunk.frames == 0)
-    {
-        chunk.to_decode = 0;
-    }
-
-    return chunk;
-}
-
 } // namespace
 
 void EadMiddlePlayer::StartReverbItem(AudioMemory& memory, Reverb& reverb, int length, int update)
@@ -197,78 +125,30 @@ void EadMiddlePlayer::StartReverbItem(AudioMemory& memory, Reverb& reverb, int l
     ReverbItem& item = reverb.items[reverb.current_frame][static_cast<std::size_t>(update)];
     if (reverb.downsample != 1 && reverb.frames_to_ignore == 0)
     {
-        // The CPU thins the samples that the microcode saved in this frame's slot two frames ago.
-        int from = 0;
-        const auto copy = [&](int count, int ring_start)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                const uint32_t at = static_cast<uint32_t>(from) * 2;
-                const auto place = static_cast<uint32_t>(ring_start + i) * 2;
-                WriteBe16(memory, reverb.left + place, ReadBe16(memory, item.downsample_left + at));
-                WriteBe16(memory, reverb.right + place, ReadBe16(memory, item.downsample_right + at));
-                from += reverb.downsample;
-            }
-        };
-
-        copy(item.length_a / 2, item.start);
-        copy(item.length_b / 2, 0);
+        ead_reverb::ThinSamples(memory, reverb, item);
     }
 
-    const int samples = length / reverb.downsample;
-    const int extra = samples + reverb.next_position - reverb.buffer_samples;
-    item.start = reverb.next_position;
-    if (extra < 0)
-    {
-        item.length_a = static_cast<int16_t>(samples * 2);
-        item.length_b = 0;
-        reverb.next_position += samples;
-    }
-    else
-    {
-        item.length_a = static_cast<int16_t>((samples - extra) * 2);
-        item.length_b = static_cast<int16_t>(extra * 2);
-        reverb.next_position = extra;
-    }
+    ead_reverb::PlaceItem(reverb, item, length);
 }
 
 void EadMiddlePlayer::LoadReverbSamples(AudioList& list, const Reverb& reverb, int length, int update)
 {
     const ReverbItem& item = reverb.items[reverb.current_frame][static_cast<std::size_t>(update)];
-    const auto load = [&](uint32_t dmem, int offset, uint32_t size)
+
+    const auto load = [&list](uint32_t dmem, uint32_t address, uint32_t size)
     {
-        const auto bytes = static_cast<uint32_t>(offset) * 2;
-        Load(list, reverb.left + bytes, dmem, size);
-        Load(list, reverb.right + bytes, dmem + kOneChannel, size);
+        Load(list, address, dmem, size);
+    };
+
+    const auto resample = [&](uint32_t in, uint32_t out, uint32_t size, int side)
+    {
+        SetBuffer(list, in, out, size);
+        Resample(list, reverb.resample_flags, reverb.downsample_pitch,
+                 side == 0 ? reverb.resample_left : reverb.resample_right);
     };
 
     Clear(list, kDmemWetLeft, kTwoChannels);
-    if (reverb.downsample == 1)
-    {
-        load(kDmemWetLeft, item.start, static_cast<uint16_t>(item.length_a));
-        if (item.length_b != 0)
-        {
-            load(kDmemWetLeft + static_cast<uint32_t>(item.length_a), 0, static_cast<uint16_t>(item.length_b));
-        }
-    }
-    else
-    {
-        const int start_pad = (item.start % 8) * 2;
-        const int padded = Align16(start_pad + item.length_a);
-        load(kDmemResampled, item.start - start_pad / 2, kOneChannel);
-        if (item.length_b != 0)
-        {
-            load(kDmemResampled + static_cast<uint32_t>(padded), 0, kOneChannel - static_cast<uint32_t>(padded));
-        }
-
-        const auto pad = static_cast<uint32_t>(start_pad);
-        const auto size = static_cast<uint32_t>(length) * 2;
-        SetBuffer(list, kDmemResampled + pad, kDmemWetLeft, size);
-        Resample(list, reverb.resample_flags, reverb.downsample_pitch, reverb.resample_left);
-        SetBuffer(list, kDmemDecoded + pad, kDmemWetRight, size);
-        Resample(list, reverb.resample_flags, reverb.downsample_pitch, reverb.resample_right);
-    }
-
+    ead_reverb::LoadSamples(reverb, item, length, {kDmemWetLeft, kDmemResampled, kOneChannel}, load, resample);
     Mix(list, kTwoChannels, 0x7FFF, kDmemWetLeft, kDmemLeft);
     Mix(list, kTwoChannels, 0x8000U + reverb.gain, kDmemWetLeft, kDmemWetLeft);
 }
@@ -278,18 +158,12 @@ void EadMiddlePlayer::SaveReverbSamples(AudioList& list, Reverb& reverb, int upd
     const ReverbItem& item = reverb.items[reverb.current_frame][static_cast<std::size_t>(update)];
     if (reverb.downsample == 1)
     {
-        const auto save = [&](uint32_t dmem, int offset, uint32_t size)
+        const auto save = [&list](uint32_t dmem, uint32_t address, uint32_t size)
         {
-            const auto bytes = static_cast<uint32_t>(offset) * 2;
-            Save(list, dmem, reverb.left + bytes, size);
-            Save(list, dmem + kOneChannel, reverb.right + bytes, size);
+            Save(list, dmem, address, size);
         };
 
-        save(kDmemWetLeft, item.start, static_cast<uint16_t>(item.length_a));
-        if (item.length_b != 0)
-        {
-            save(kDmemWetLeft + static_cast<uint32_t>(item.length_a), 0, static_cast<uint16_t>(item.length_b));
-        }
+        ead_reverb::TransferParts(reverb, item, kDmemWetLeft, kOneChannel, save);
     }
     else
     {
@@ -465,7 +339,7 @@ std::optional<uint32_t> EadMiddlePlayer::DecodeSample(AudioList& list, AudioMemo
 
         if (state.book_offset != 0)
         {
-            // The engine then holds the place of another table. The next part loads the book again.
+            // The engine's record of the loaded book then names another table. The next part loads the book again.
             loaded_book = 1;
         }
 
@@ -484,8 +358,8 @@ std::optional<uint32_t> EadMiddlePlayer::DecodeSample(AudioList& list, AudioMemo
         }
         else if (part == 0)
         {
-            Halve(list, static_cast<uint32_t>(Align8(wanted / 2)), kDmemDecoded + static_cast<uint32_t>(skip_bytes),
-                  kDmemResampled);
+            Halve(list, static_cast<uint32_t>(ntdlib::AlignUp(wanted / 2, 8)),
+                  kDmemDecoded + static_cast<uint32_t>(skip_bytes), kDmemResampled);
             resampled_length = wanted;
             before_resampling = kDmemResampled;
             if (state.finished)
@@ -496,7 +370,8 @@ std::optional<uint32_t> EadMiddlePlayer::DecodeSample(AudioList& list, AudioMemo
         }
         else
         {
-            Halve(list, static_cast<uint32_t>(Align8(wanted / 2)), kDmemDecoded + static_cast<uint32_t>(skip_bytes),
+            Halve(list, static_cast<uint32_t>(ntdlib::AlignUp(wanted / 2, 8)),
+                  kDmemDecoded + static_cast<uint32_t>(skip_bytes),
                   static_cast<uint32_t>(resampled_length) + kDmemResampled);
         }
 
@@ -516,19 +391,10 @@ bool EadMiddlePlayer::DecodeChunk(AudioList& list, int voice_index, UpdateState&
 {
     Voice& voice = voices_[static_cast<std::size_t>(voice_index)];
     const int to_process = decode.wanted - decode.processed;
-    const ChunkPlan chunk =
-        PlanChunk(voice.position, voice.restart, decode.end_position, to_process, decode.loop->count != 0);
-    uint32_t start_pad = 0;
-    const int aligned = Align16(chunk.frames * 9 + kFrameSamples);
-    const uint32_t compressed = kDmemCompressedEnd - static_cast<uint32_t>(aligned);
-    if (chunk.frames != 0)
-    {
-        const int frame = (voice.position - chunk.ignored_first + kFrameSamples) / kFrameSamples;
-        const uint32_t data = decode.address + static_cast<uint32_t>(frame * 9);
-        start_pad = data & 0xF;
-        Load(list, data - start_pad, compressed, static_cast<uint32_t>(aligned));
-    }
-
+    const EadAdpcmPass pass = PlanAdpcmPass(voice.position, voice.restart, decode.end_position - voice.position,
+                                            to_process, decode.loop->count != 0);
+    const uint32_t start_pad = LoadFrames(list, decode.address, voice.position, pass, kFrameSize, kDmemCompressedEnd);
+    const uint32_t compressed = FramesPlace(pass, kFrameSize, kDmemCompressedEnd);
     if (voice.restart)
     {
         list.commands.push_back(
@@ -537,44 +403,38 @@ bool EadMiddlePlayer::DecodeChunk(AudioList& list, int voice_index, UpdateState&
         voice.restart = false;
     }
 
-    const int this_time = chunk.to_decode + chunk.in_first - chunk.trailing;
-    const int moved_to = Align16(decode.written + kFrameSamples);
+    const int this_time = pass.Samples();
+    const int moved_to = ntdlib::AlignUp(decode.written + kFrameSamples, 16);
     if (decode.processed == 0)
     {
-        SetBuffer(list, compressed + start_pad, kDmemDecoded, static_cast<uint32_t>(chunk.to_decode) * 2);
+        SetBuffer(list, compressed + start_pad, kDmemDecoded, static_cast<uint32_t>(pass.to_decode) * 2);
         list.commands.push_back({Word0(kOpAdpcm, flags, 0), voice.adpcm_state});
-        skip_bytes = chunk.ignored_first * 2;
+        skip_bytes = pass.ignored_first * 2;
     }
     else
     {
         SetBuffer(list, compressed + start_pad, kDmemDecoded + static_cast<uint32_t>(moved_to),
-                  static_cast<uint32_t>(chunk.to_decode) * 2);
+                  static_cast<uint32_t>(pass.to_decode) * 2);
         list.commands.push_back({Word0(kOpAdpcm, flags, 0), voice.adpcm_state});
-        Move(list, kDmemDecoded + static_cast<uint32_t>(moved_to) + static_cast<uint32_t>(chunk.ignored_first) * 2,
+        Move(list, kDmemDecoded + static_cast<uint32_t>(moved_to) + static_cast<uint32_t>(pass.ignored_first) * 2,
              kDmemDecoded + static_cast<uint32_t>(decode.written), static_cast<uint32_t>(this_time) * 2);
     }
 
     decode.processed += this_time;
+
     if (flags == kFlagInit)
     {
         skip_bytes = kFrameSamples * 2;
-        decode.written = chunk.to_decode * 2 + kFrameSamples * 2;
-    }
-    else if (flags == kFlagLoop)
-    {
-        decode.written = this_time * 2 + decode.written;
-    }
-    else if (decode.written != 0)
-    {
-        decode.written = this_time * 2 + decode.written;
+        decode.written = pass.to_decode * 2 + kFrameSamples * 2;
     }
     else
     {
-        decode.written = (chunk.ignored_first + this_time) * 2;
+        decode.written = WrittenAfterPass(flags == kFlagLoop, decode.written, pass);
     }
 
     flags = kFlagContinue;
-    if (chunk.note_finished)
+
+    if (pass.note_finished)
     {
         Clear(list, kDmemDecoded + static_cast<uint32_t>(decode.written),
               static_cast<uint32_t>(decode.wanted - decode.processed) * 2);
@@ -586,7 +446,7 @@ bool EadMiddlePlayer::DecodeChunk(AudioList& list, int voice_index, UpdateState&
         return true;
     }
 
-    AdvancePosition(voice, decode, chunk.restart, to_process);
+    AdvancePosition(voice, decode, pass.restart, to_process);
 
     return false;
 }
@@ -594,17 +454,7 @@ bool EadMiddlePlayer::DecodeChunk(AudioList& list, int voice_index, UpdateState&
 // Disables a voice in the later updates of the frame, up to the next update that starts it again.
 void EadMiddlePlayer::DisableLaterUpdates(int voice_index, int update)
 {
-    for (int later = update + 1; later < updates_per_frame_; later++)
-    {
-        UpdateState& next =
-            update_states_[voices_.size() * static_cast<std::size_t>(later) + static_cast<std::size_t>(voice_index)];
-        if (next.needs_init)
-        {
-            break;
-        }
-
-        next.enabled = false;
-    }
+    ead_common::DisableLaterUpdates(update_states_, voices_.size(), updates_per_frame_, voice_index, update);
 }
 
 // Finds the sample of an update and writes the books and loops of its bank to memory. Returns the sample and its
@@ -681,51 +531,36 @@ void EadMiddlePlayer::BuildEnvelope(AudioList& list, const UpdateState& state, V
 void EadMiddlePlayer::BuildDelay(AudioList& list, const UpdateState& state, Voice& voice, int size, uint32_t flags,
                                  int side)
 {
-    uint32_t target = 0;
-    uint32_t shift = 0;
-    uint32_t previous_shift = 0;
-    if (side == 1)
-    {
-        target = kDmemLeft;
-        shift = state.delay_right;
-        voice.previous_delay_left = 0;
-        previous_shift = voice.previous_delay_right;
-        voice.previous_delay_right = static_cast<uint8_t>(shift);
-    }
-    else if (side == 2)
-    {
-        target = kDmemRight;
-        shift = state.delay_left;
-        voice.previous_delay_right = 0;
-        previous_shift = voice.previous_delay_left;
-        voice.previous_delay_left = static_cast<uint8_t>(shift);
-    }
-    else
+    const std::optional<ead_common::HeadsetDelay> delay =
+        ead_common::ChooseHeadsetDelay(side, kDmemLeft, kDmemRight, state.delay_left, state.delay_right,
+                                       voice.previous_delay_left, voice.previous_delay_right);
+    if (!delay)
     {
         return;
     }
 
+    const uint32_t shift = delay->shift;
+    const uint32_t previous_shift = delay->previous_shift;
     const auto bytes = static_cast<uint32_t>(size);
     const uint32_t shifted = shift + bytes - previous_shift;
     if (flags != kFlagInit)
     {
         // A small change of rate fits a change of the delay.
+        const uint32_t pitch = ead_common::HeadsetResamplePitch(bytes, *delay);
         if (previous_shift == 0)
         {
             Move(list, kDmemPanTemp, 0, 8);
             Clear(list, 8, 8);
             Move(list, kDmemPanTemp, 0x10, 0x10);
             Save(list, 0, voice.pan_resample_state, 0x20);
-            const uint32_t divisor = bytes + shift - previous_shift + 8;
             SetBuffer(list, kDmemPanTemp + 8, 0, shifted);
-            Resample(list, 0, ((bytes << 15) / divisor) & 0xFFFF, voice.pan_resample_state);
+            Resample(list, 0, pitch, voice.pan_resample_state);
             Move(list, 0, kDmemPanTemp, shifted);
         }
         else
         {
-            const uint32_t divisor = shift == 0 ? bytes - previous_shift - 4 : shifted;
             SetBuffer(list, kDmemPanTemp, 0, shifted);
-            Resample(list, 0, ((bytes << 15) / divisor) & 0xFFFF, voice.pan_resample_state);
+            Resample(list, 0, pitch, voice.pan_resample_state);
             Load(list, voice.pan_samples, kDmemPanTemp, previous_shift);
             Move(list, 0, kDmemPanTemp + previous_shift, shifted);
         }
@@ -743,14 +578,14 @@ void EadMiddlePlayer::BuildDelay(AudioList& list, const UpdateState& state, Voic
         Save(list, kDmemPanTemp + bytes, voice.pan_samples, shift);
     }
 
-    Mix(list, static_cast<uint32_t>((size + 31) & ~31), 0x7FFF, kDmemPanTemp, target);
+    Mix(list, static_cast<uint32_t>(ntdlib::AlignUp(size, 32)), 0x7FFF, kDmemPanTemp, delay->target);
 }
 
 void EadMiddlePlayer::BuildRampTables()
 {
     // The code at 0x800B7450 in Wave Race 64. An envelope's ramp over an update multiplies a volume by a factor in each
-    // group of 8 samples. Each table holds a volume's root for an update of a size: 8 samples shorter, the usual size
-    // and 8 samples longer.
+    // group of 8 samples. Each table contains a volume's root for an update of a size: 8 samples shorter, the usual
+    // size and 8 samples longer.
     constexpr std::size_t kSteps = 1024;
     constexpr int kVolumeStep = 32;
     constexpr double kScale = 65536.0;
@@ -772,45 +607,26 @@ void EadMiddlePlayer::BuildRampTables()
 void EadMiddlePlayer::LoadReverbStandard(AudioList& list, const Reverb& reverb, int length, int update) const
 {
     const ReverbItem& item = reverb.items[reverb.current_frame][static_cast<std::size_t>(update)];
-    const auto load = [&](uint32_t dmem, int offset, uint32_t size)
+
+    const auto load = [&list](uint32_t dmem, uint32_t address, uint32_t size)
     {
-        const auto bytes = static_cast<uint32_t>(offset) * 2;
         list.SetBuffer(0, dmem, 0, size);
-        list.LoadBuffer(reverb.left + bytes);
-        list.SetBuffer(0, dmem + kStdOneChannel, 0, size);
-        list.LoadBuffer(reverb.right + bytes);
+        list.LoadBuffer(address);
     };
 
-    list.ClearBuffer(kStdWetLeft, kStdTwoChannels);
-    if (reverb.downsample == 1)
+    const auto resample = [&](uint32_t in, uint32_t out, uint32_t size, int side)
     {
-        load(kStdWetLeft, item.start, static_cast<uint16_t>(item.length_a));
-        if (item.length_b != 0)
-        {
-            load(kStdWetLeft + static_cast<uint32_t>(item.length_a), 0, static_cast<uint16_t>(item.length_b));
-        }
-    }
-    else
-    {
-        const int start_pad = (item.start % 8) * 2;
-        const int padded = Align16(start_pad + item.length_a);
-        load(kStdResampled, item.start - start_pad / 2, kStdOneChannel);
-        if (item.length_b != 0)
-        {
-            load(kStdResampled + static_cast<uint32_t>(padded), 0, kStdOneChannel - static_cast<uint32_t>(padded));
-        }
+        list.SetBuffer(0, in, out, size);
+        list.Resample(reverb.resample_flags, reverb.downsample_pitch,
+                      side == 0 ? reverb.resample_left : reverb.resample_right);
+    };
 
-        const auto pad = static_cast<uint32_t>(start_pad);
-        const auto size = static_cast<uint32_t>(length) * 2;
-        list.SetBuffer(0, kStdResampled + pad, kStdWetLeft, size);
-        list.Resample(reverb.resample_flags, reverb.downsample_pitch, reverb.resample_left);
-        list.SetBuffer(0, kStdResampled2 + pad, kStdWetRight, size);
-        list.Resample(reverb.resample_flags, reverb.downsample_pitch, reverb.resample_right);
-    }
-
-    list.SetBuffer(0, 0, 0, kStdTwoChannels);
-    list.Mixer(0, 0x7FFF, kStdWetLeft, kStdLeft);
-    list.Mixer(0, 0x8000U + reverb.gain, kStdWetLeft, kStdWetLeft);
+    list.ClearBuffer(standard::kWetLeft, standard::kTwoChannels);
+    ead_reverb::LoadSamples(reverb, item, length, {standard::kWetLeft, standard::kResampled, standard::kOneChannel},
+                            load, resample);
+    list.SetBuffer(0, 0, 0, standard::kTwoChannels);
+    list.Mixer(0, 0x7FFF, standard::kWetLeft, standard::kLeft);
+    list.Mixer(0, 0x8000U + reverb.gain, standard::kWetLeft, standard::kWetLeft);
 }
 
 void EadMiddlePlayer::SaveReverbStandard(AudioList& list, Reverb& reverb, int update) const
@@ -818,24 +634,17 @@ void EadMiddlePlayer::SaveReverbStandard(AudioList& list, Reverb& reverb, int up
     const ReverbItem& item = reverb.items[reverb.current_frame][static_cast<std::size_t>(update)];
     if (reverb.downsample == 1)
     {
-        const auto save = [&](uint32_t dmem, int offset, uint32_t size)
+        const auto save = [&list](uint32_t dmem, uint32_t address, uint32_t size)
         {
-            const auto bytes = static_cast<uint32_t>(offset) * 2;
             list.SetBuffer(0, 0, dmem, size);
-            list.SaveBuffer(reverb.left + bytes);
-            list.SetBuffer(0, 0, dmem + kStdOneChannel, size);
-            list.SaveBuffer(reverb.right + bytes);
+            list.SaveBuffer(address);
         };
 
-        save(kStdWetLeft, item.start, static_cast<uint16_t>(item.length_a));
-        if (item.length_b != 0)
-        {
-            save(kStdWetLeft + static_cast<uint32_t>(item.length_a), 0, static_cast<uint16_t>(item.length_b));
-        }
+        ead_reverb::TransferParts(reverb, item, standard::kWetLeft, standard::kOneChannel, save);
     }
     else
     {
-        list.SetBuffer(0, 0, kStdWetLeft, kStdTwoChannels);
+        list.SetBuffer(0, 0, standard::kWetLeft, standard::kTwoChannels);
         list.SaveBuffer(item.downsample_left);
         reverb.resample_flags = 0;
     }
@@ -850,7 +659,7 @@ void EadMiddlePlayer::BuildUpdateStandard(AudioList& list, AudioMemory& memory, 
         return update_states_[row + static_cast<std::size_t>(voice)];
     };
 
-    list.ClearBuffer(kStdLeft, kStdTwoChannels);
+    list.ClearBuffer(standard::kLeft, standard::kTwoChannels);
     bool use_reverb = false;
     for (std::size_t r = 0; r < reverbs_.size(); r++)
     {
@@ -892,7 +701,7 @@ void EadMiddlePlayer::BuildUpdateStandard(AudioList& list, AudioMemory& memory, 
     list.MarkChunkEnd();
     const auto size = static_cast<uint32_t>(length) * 2;
     list.SetBuffer(0, 0, kDmemTemp, size);
-    list.Interleave(kStdLeft, kStdRight);
+    list.Interleave(standard::kLeft, standard::kRight);
     list.SetBuffer(0, 0, kDmemTemp, size * 2);
     list.SaveBuffer(output);
 }
@@ -970,7 +779,7 @@ void EadMiddlePlayer::BuildVoiceStandard(AudioList& list, AudioMemory& memory, i
 // LoadWave in the lists for the standard microcode.
 uint32_t EadMiddlePlayer::LoadWaveStandard(AudioList& list, const UpdateState& state, Voice& voice, int32_t to_load)
 {
-    list.SetBuffer(0, kStdDecoded, 0, kWaveSamples * 2);
+    list.SetBuffer(0, standard::kDecoded, 0, kWaveSamples * 2);
     list.LoadBuffer(state.wave_address);
     voice.position &= kWaveSamples - 1;
     const int available = kWaveSamples - voice.position;
@@ -979,11 +788,12 @@ uint32_t EadMiddlePlayer::LoadWaveStandard(AudioList& list, const UpdateState& s
         const int copies = (to_load - available + kWaveSamples - 1) / kWaveSamples;
         for (int i = 0; i < copies; i++)
         {
-            list.DmemMove(kStdDecoded, kStdDecoded + static_cast<uint32_t>(1 + i) * kWaveSamples * 2, kWaveSamples * 2);
+            list.DmemMove(standard::kDecoded, standard::kDecoded + static_cast<uint32_t>(1 + i) * kWaveSamples * 2,
+                          kWaveSamples * 2);
         }
     }
 
-    const uint32_t before_resampling = kStdDecoded + static_cast<uint32_t>(voice.position) * 2;
+    const uint32_t before_resampling = standard::kDecoded + static_cast<uint32_t>(voice.position) * 2;
     voice.position += to_load;
 
     return before_resampling;
@@ -1025,7 +835,7 @@ std::optional<uint32_t> EadMiddlePlayer::DecodeSampleStandard(AudioList& list, A
 
         if (state.book_offset != 0)
         {
-            // The engine then holds the place of another table. The next part loads the book again.
+            // The engine's record of the loaded book then names another table. The next part loads the book again.
             loaded_book = 1;
         }
 
@@ -1039,28 +849,14 @@ std::optional<uint32_t> EadMiddlePlayer::DecodeSampleStandard(AudioList& list, A
 
         if (parts == 1)
         {
-            before_resampling = kStdDecoded + skip_bytes;
-        }
-        else if (part == 0)
-        {
-            constexpr uint32_t kHalvingPitch = 0xFF60;
-            const auto bytes = static_cast<uint32_t>(decode.wanted);
-            list.SetBuffer(0, kStdDecoded + skip_bytes, kStdResampled, bytes + 4);
-            list.Resample(kFlagInit, kHalvingPitch, voice.halving_state);
-            resampled_length = bytes + 4;
-            before_resampling = kStdResampled + 4;
-            if (state.finished)
-            {
-                list.ClearBuffer(kStdResampled + resampled_length, bytes + 0x10);
-            }
+            before_resampling = standard::kDecoded + skip_bytes;
         }
         else
         {
-            constexpr uint32_t kHalvingPitch = 0xFF60;
-            const auto bytes = static_cast<uint32_t>(decode.wanted);
-            list.SetBuffer(0, kStdDecoded + skip_bytes, kStdResampled2, bytes + 8);
-            list.Resample(kFlagInit, kHalvingPitch, voice.halving_state);
-            list.DmemMove(kStdResampled2 + 4, kStdResampled + resampled_length, bytes + 4);
+            ead_standard_lists::HalvePart(list, part, standard::kDecoded + skip_bytes,
+                                          static_cast<uint32_t>(decode.wanted), state.finished, voice.halving_state,
+                                          resampled_length);
+            before_resampling = standard::kResampled + 4;
         }
 
         if (state.finished)
@@ -1077,18 +873,9 @@ bool EadMiddlePlayer::DecodeChunkStandard(AudioList& list, Voice& voice, UpdateS
                                           uint8_t& flags, uint32_t& skip_bytes)
 {
     const int to_process = decode.wanted - decode.processed;
-    const ChunkPlan chunk =
-        PlanChunk(voice.position, voice.restart, decode.end_position, to_process, decode.loop->count != 0);
-    uint32_t start_pad = 0;
-    if (chunk.frames != 0)
-    {
-        const int frame = (voice.position - chunk.ignored_first + kFrameSamples) / kFrameSamples;
-        const uint32_t data = decode.address + static_cast<uint32_t>(frame * 9);
-        start_pad = data & 0xF;
-        list.SetBuffer(0, kStdCompressed, 0, static_cast<uint32_t>(chunk.frames * 9) + start_pad);
-        list.LoadBuffer(data - start_pad);
-    }
-
+    const EadAdpcmPass pass = PlanAdpcmPass(voice.position, voice.restart, decode.end_position - voice.position,
+                                            to_process, decode.loop->count != 0);
+    const uint32_t start_pad = ead_standard_lists::LoadFrames(list, decode.address, voice.position, pass);
     if (voice.restart)
     {
         list.SetLoop(loop_addresses_[state.sound_bank][static_cast<std::size_t>(decode.sample->loop)]);
@@ -1096,47 +883,31 @@ bool EadMiddlePlayer::DecodeChunkStandard(AudioList& list, Voice& voice, UpdateS
         voice.restart = false;
     }
 
-    const int this_time = chunk.to_decode + chunk.in_first - chunk.trailing;
-    const auto written_bytes = static_cast<uint32_t>(decode.written);
-    if (decode.processed == 0)
+    const bool first = decode.processed == 0;
+    ead_standard_lists::DecodePass(list, pass, start_pad, first, static_cast<uint32_t>(decode.written), flags,
+                                   voice.adpcm_state);
+    if (first)
     {
-        list.SetBuffer(0, kStdCompressed + start_pad, kStdDecoded, static_cast<uint32_t>(chunk.to_decode) * 2);
-        list.Adpcm(flags, voice.adpcm_state);
-        skip_bytes = static_cast<uint32_t>(chunk.ignored_first) * 2;
-    }
-    else
-    {
-        const uint32_t moved_to = (written_bytes + 31) & ~31U;
-        list.SetBuffer(0, kStdCompressed + start_pad, kStdDecoded + moved_to,
-                       static_cast<uint32_t>(chunk.to_decode) * 2);
-        list.Adpcm(flags, voice.adpcm_state);
-        list.DmemMove(kStdDecoded + moved_to + static_cast<uint32_t>(chunk.ignored_first) * 2,
-                      kStdDecoded + written_bytes, static_cast<uint32_t>(this_time) * 2);
+        skip_bytes = static_cast<uint32_t>(pass.ignored_first) * 2;
     }
 
-    decode.processed += this_time;
+    decode.processed += pass.Samples();
+
     if (flags == kFlagInit)
     {
         skip_bytes = 0;
-        decode.written = chunk.to_decode * 2 + decode.written;
-    }
-    else if (flags == kFlagLoop)
-    {
-        decode.written = this_time * 2 + decode.written;
-    }
-    else if (decode.written != 0)
-    {
-        decode.written = this_time * 2 + decode.written;
+        decode.written = pass.to_decode * 2 + decode.written;
     }
     else
     {
-        decode.written = (chunk.ignored_first + this_time) * 2;
+        decode.written = WrittenAfterPass(flags == kFlagLoop, decode.written, pass);
     }
 
     flags = kFlagContinue;
-    if (chunk.note_finished)
+
+    if (pass.note_finished)
     {
-        list.ClearBuffer(kStdDecoded + static_cast<uint32_t>(decode.written),
+        list.ClearBuffer(standard::kDecoded + static_cast<uint32_t>(decode.written),
                          static_cast<uint32_t>(decode.wanted - decode.processed) * 2);
         state.finished = true;
         voice.state.finished = true;
@@ -1145,7 +916,7 @@ bool EadMiddlePlayer::DecodeChunkStandard(AudioList& list, Voice& voice, UpdateS
         return true;
     }
 
-    AdvancePosition(voice, decode, chunk.restart, to_process);
+    AdvancePosition(voice, decode, pass.restart, to_process);
 
     return false;
 }
@@ -1158,6 +929,7 @@ void EadMiddlePlayer::BuildEnvelopeStandard(AudioList& list, const UpdateState& 
     const uint16_t source_right = voice.current_right;
     auto target_left = static_cast<uint16_t>(state.target_left << 5);
     auto target_right = static_cast<uint16_t>(state.target_right << 5);
+
     if (target_left == 0)
     {
         target_left = 1;
@@ -1173,26 +945,27 @@ void EadMiddlePlayer::BuildEnvelopeStandard(AudioList& list, const UpdateState& 
     const auto size = static_cast<uint32_t>(length) * 2;
     if (state.headset_effects)
     {
-        list.ClearBuffer(kStdPanTemp, kStdOneChannel);
-        list.SetBuffer(0, kDmemTemp, side == 1 ? kStdPanTemp : kStdLeft, size);
-        list.SetBuffer(kAudioFlagAux, side == 2 ? kStdPanTemp : kStdRight, kStdWetLeft, kStdWetRight);
+        list.ClearBuffer(standard::kPanTemp, standard::kOneChannel);
+        list.SetBuffer(0, kDmemTemp, side == 1 ? standard::kPanTemp : standard::kLeft, size);
+        list.SetBuffer(kAudioFlagAux, side == 2 ? standard::kPanTemp : standard::kRight, standard::kWetLeft,
+                       standard::kWetRight);
     }
     else if (state.strong_right)
     {
-        list.ClearBuffer(kStdStrongDry, kStdTwoChannels);
-        list.SetBuffer(0, kDmemTemp, kStdStrongDry, size);
-        list.SetBuffer(kAudioFlagAux, kStdRight, kStdStrongWet, kStdWetRight);
+        list.ClearBuffer(standard::kStrongDry, standard::kTwoChannels);
+        list.SetBuffer(0, kDmemTemp, standard::kStrongDry, size);
+        list.SetBuffer(kAudioFlagAux, standard::kRight, standard::kStrongWet, standard::kWetRight);
     }
     else if (state.strong_left)
     {
-        list.ClearBuffer(kStdStrongDry, kStdTwoChannels);
-        list.SetBuffer(0, kDmemTemp, kStdLeft, size);
-        list.SetBuffer(kAudioFlagAux, kStdStrongDry, kStdWetLeft, kStdStrongWet);
+        list.ClearBuffer(standard::kStrongDry, standard::kTwoChannels);
+        list.SetBuffer(0, kDmemTemp, standard::kLeft, size);
+        list.SetBuffer(kAudioFlagAux, standard::kStrongDry, standard::kWetLeft, standard::kStrongWet);
     }
     else
     {
-        list.SetBuffer(0, kDmemTemp, kStdLeft, size);
-        list.SetBuffer(kAudioFlagAux, kStdRight, kStdWetLeft, kStdWetRight);
+        list.SetBuffer(0, kDmemTemp, standard::kLeft, size);
+        list.SetBuffer(kAudioFlagAux, standard::kRight, standard::kWetLeft, standard::kWetRight);
     }
 
     uint8_t flags = kFlagContinue;
@@ -1218,10 +991,11 @@ void EadMiddlePlayer::BuildEnvelopeStandard(AudioList& list, const UpdateState& 
     {
         constexpr uint32_t kSubtract = 0x8000;
         list.SetBuffer(0, 0, 0, size);
-        list.Mixer(0, kSubtract, kStdStrongDry, state.strong_right ? kStdLeft : kStdRight);
+        list.Mixer(0, kSubtract, standard::kStrongDry, state.strong_right ? standard::kLeft : standard::kRight);
         if (wet)
         {
-            list.Mixer(0, kSubtract, kStdStrongWet, state.strong_right ? kStdWetLeft : kStdWetRight);
+            list.Mixer(0, kSubtract, standard::kStrongWet,
+                       state.strong_right ? standard::kWetLeft : standard::kWetRight);
         }
     }
 }
@@ -1230,86 +1004,19 @@ void EadMiddlePlayer::BuildDelayStandard(AudioList& list, const UpdateState& sta
                                          uint32_t flags, int side)
 {
     // The code at 0x800B6F18 in Wave Race 64.
-    uint32_t target = 0;
-    uint32_t shift = 0;
-    uint32_t previous_shift = 0;
-    if (side == 1)
+    const std::optional<ead_common::HeadsetDelay> delay =
+        ead_common::ChooseHeadsetDelay(side, standard::kLeft, standard::kRight, state.delay_left, state.delay_right,
+                                       voice.previous_delay_left, voice.previous_delay_right);
+    if (delay)
     {
-        target = kStdLeft;
-        shift = state.delay_right;
-        voice.previous_delay_left = 0;
-        previous_shift = voice.previous_delay_right;
-        voice.previous_delay_right = static_cast<uint8_t>(shift);
+        ead_standard_lists::BuildHeadsetDelay(list, *delay, static_cast<uint32_t>(size), flags == kFlagInit,
+                                              voice.pan_resample_state, voice.pan_samples);
     }
-    else if (side == 2)
-    {
-        target = kStdRight;
-        shift = state.delay_left;
-        voice.previous_delay_right = 0;
-        previous_shift = voice.previous_delay_left;
-        voice.previous_delay_left = static_cast<uint8_t>(shift);
-    }
-    else
-    {
-        return;
-    }
-
-    const auto bytes = static_cast<uint32_t>(size);
-    const uint32_t shifted = shift + bytes - previous_shift;
-    if (flags != kFlagInit)
-    {
-        // A small change of rate fits a change of the delay.
-        if (previous_shift == 0)
-        {
-            list.DmemMove(kStdPanTemp, kDmemTemp, 8);
-            list.ClearBuffer(8, 8);
-            list.DmemMove(kStdPanTemp, kDmemTemp + 0x10, 0x10);
-            list.SetBuffer(0, 0, kDmemTemp, 32);
-            list.SaveBuffer(voice.pan_resample_state);
-            const uint32_t divisor = bytes + shift - previous_shift + 8;
-            list.SetBuffer(0, kStdPanTemp + 8, kDmemTemp, shifted);
-            list.Resample(0, ((bytes << 15) / divisor) & 0xFFFF, voice.pan_resample_state);
-        }
-        else
-        {
-            const uint32_t divisor = shift == 0 ? bytes - previous_shift - 4 : shifted;
-            list.SetBuffer(0, kStdPanTemp, kDmemTemp, shifted);
-            list.Resample(0, ((bytes << 15) / divisor) & 0xFFFF, voice.pan_resample_state);
-        }
-
-        if (previous_shift != 0)
-        {
-            list.SetBuffer(0, kStdPanTemp, 0, previous_shift);
-            list.LoadBuffer(voice.pan_samples);
-            list.DmemMove(kDmemTemp, kStdPanTemp + previous_shift, shifted);
-        }
-        else
-        {
-            list.DmemMove(kDmemTemp, kStdPanTemp, shifted);
-        }
-    }
-    else
-    {
-        // The delay only moves the samples to the right.
-        list.DmemMove(kStdPanTemp, kDmemTemp, bytes);
-        list.DmemMove(kDmemTemp, kStdPanTemp + shift, bytes);
-        list.ClearBuffer(kStdPanTemp, shift);
-    }
-
-    if (shift != 0)
-    {
-        list.SetBuffer(0, 0, kStdPanTemp + bytes, shift);
-        list.SaveBuffer(voice.pan_samples);
-    }
-
-    list.SetBuffer(0, 0, 0, bytes);
-    list.Mixer(0, 0x7FFF, kStdPanTemp, target);
 }
 
 bool EadMiddlePlayer::Busy() const
 {
-    return std::ranges::any_of(players_, [](const Player& player) { return player.enabled; }) ||
-           std::ranges::any_of(voices_, [](const Voice& voice) { return voice.state.enabled; });
+    return ead_common::AnyEnabled(players_, voices_);
 }
 
 void EadMiddlePlayer::RunFrame(AudioList& list, AudioMemory& memory, uint32_t output, int samples)
@@ -1324,7 +1031,9 @@ void EadMiddlePlayer::RunFrame(AudioList& list, AudioMemory& memory, uint32_t ou
     int remaining = samples;
     for (int left = updates_per_frame_; left > 0; left--)
     {
-        const int length = UpdateLength(remaining, left);
+        // The size of the update chooses the ramp table.
+        const int length = ead_common::UpdateLength(remaining, left, samples_per_update_min_, samples_per_update_,
+                                                    samples_per_update_max_, &ramp_table_);
         const int update = updates_per_frame_ - left;
         for (std::size_t r = 0; r < reverbs_.size(); r++)
         {
@@ -1347,15 +1056,7 @@ void EadMiddlePlayer::RunFrame(AudioList& list, AudioMemory& memory, uint32_t ou
         address += static_cast<uint32_t>(length) * 4;
     }
 
-    for (Reverb& reverb : reverbs_)
-    {
-        if (reverb.frames_to_ignore != 0)
-        {
-            reverb.frames_to_ignore--;
-        }
-
-        reverb.current_frame ^= 1;
-    }
+    ead_reverb::EndFrame(reverbs_);
 }
 
 // Runs the players and the voices for an update. Keeps the state of each voice for the update.
@@ -1390,32 +1091,6 @@ void EadMiddlePlayer::RunUpdate(int update)
     }
 
     updates_++;
-}
-
-// Returns the samples of the next update. `remaining` samples are left for `left` updates. Chooses the ramp table for
-// that size.
-int EadMiddlePlayer::UpdateLength(int remaining, int left)
-{
-    if (left == 1)
-    {
-        return remaining;
-    }
-
-    if (remaining / left >= samples_per_update_max_)
-    {
-        ramp_table_ = 2;
-        return samples_per_update_max_;
-    }
-
-    if (remaining / left <= samples_per_update_min_)
-    {
-        ramp_table_ = 0;
-        return samples_per_update_min_;
-    }
-
-    ramp_table_ = 1;
-
-    return samples_per_update_;
 }
 
 } // namespace ultralib::n64

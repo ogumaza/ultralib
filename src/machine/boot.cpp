@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 // Boot. The PIF's boot code (IPL1 and IPL2) isn't run: the system starts in the state it leaves for the cartridge's
-// IPL3, which then runs as on the hardware. The facts come from the n64brew wiki's pages on the PIF and on the initial
+// IPL3. IPL3 then runs as on the hardware. The facts come from the n64brew wiki's pages on the PIF and on the initial
 // program load.
 
 #include <algorithm>

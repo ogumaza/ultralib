@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ead_constants.h"
 #include "ead_later_constants.h"
 #include "ead_later_tables.h"
+#include "ead_tables.h"
 #include "ultralib/n64/ead_later.h"
 
 namespace ultralib::n64
@@ -17,13 +19,12 @@ namespace ultralib::n64
 namespace
 {
 
+using ead_constants::kMuteStopNotes;
+using ead_constants::kPortamentoSpecial;
 using ead_later_constants::kMuteStopLayerNotes;
-using ead_later_constants::kMuteStopNotes;
 using ead_later_constants::kScriptEnd;
 
 namespace tables = ead_later_tables;
-
-constexpr uint8_t kPortamentoSpecial = 0x80;
 
 // Returns the sound of an instrument for a note: its low, normal or high sound.
 const EadTunedSample* SoundOfNote(const EadInstrument& held, int note)
@@ -145,24 +146,30 @@ int EadLaterPlayer::LayerCommands(int index)
                 layer.velocity_square = static_cast<float>(value * value) / (127.0F * 127.0F);
                 break;
             }
+
         case 0xCA:
             layer.pan = Read8(player, script);
             break;
+
         case 0xC9:
             layer.gate = Read8(player, script);
             break;
+
         case 0xC2:
             layer.transpose = Read8(player, script);
             break;
+
         case 0xC4:
         case 0xC5:
             layer.continuous = command == 0xC4;
             layer.continuous_started = false;
             DecayOrRelease(index, AdsrPhase::kDecay);
             break;
+
         case 0xC3:
             layer.default_length = static_cast<int16_t>(ReadVariable(player, script));
             break;
+
         case 0xC6:
             {
                 const uint8_t program = Read8(player, script);
@@ -195,9 +202,9 @@ int EadLaterPlayer::LayerCommands(int index)
                         layer.program = 0xFF;
                     }
                 }
-
                 break;
             }
+
         case 0xC7:
             {
                 layer.portamento.mode = Read8(player, script);
@@ -211,6 +218,7 @@ int EadLaterPlayer::LayerCommands(int index)
                 }
 
                 layer.portamento_target = note;
+
                 if ((layer.portamento.mode & kPortamentoSpecial) != 0)
                 {
                     layer.portamento_time = Read8(player, script);
@@ -219,59 +227,64 @@ int EadLaterPlayer::LayerCommands(int index)
                 {
                     layer.portamento_time = ReadVariable(player, script);
                 }
-
                 break;
             }
+
         case 0xC8:
             layer.portamento.mode = 0;
             break;
+
         case 0xCB:
             layer.adsr.envelope = {};
             layer.adsr.envelope.player = channel.player;
             layer.adsr.envelope.offset = static_cast<uint16_t>(Read16(player, script));
             layer.adsr.release = Read8(player, script);
             break;
+
         case 0xCF:
             layer.adsr.release = Read8(player, script);
             break;
+
         case 0xCC:
             layer.ignore_drum_pan = true;
             break;
+
         case 0xCD:
             layer.stereo = Read8(player, script);
             break;
+
         case 0xCE:
             layer.bend = tables::kBendFine[static_cast<uint8_t>(Read8(player, script) + 0x80)];
             break;
+
         case 0xF0:
             if (majora_)
             {
                 layer.flags = static_cast<uint16_t>(layer.flags & ~static_cast<uint16_t>(Read16(player, script)));
             }
-
             break;
+
         case 0xF1:
             if (majora_)
             {
                 layer.surround = Read8(player, script);
             }
-
             break;
+
         default:
             if ((command & 0xF0) == 0xD0)
             {
                 const int place = player.short_velocities;
                 const int value = place >= 0 ? PeekByte(player, static_cast<uint32_t>(place) + (command & 0xFU))
-                                             : tables::kShortVelocity[command & 0xFU];
+                                             : ead_tables::kShortVelocity[command & 0xFU];
                 layer.velocity_square = static_cast<float>(value * value) / (127.0F * 127.0F);
             }
             else if ((command & 0xF0) == 0xE0)
             {
                 const int place = player.short_gates;
                 layer.gate = place >= 0 ? PeekByte(player, static_cast<uint32_t>(place) + (command & 0xFU))
-                                        : tables::kShortGate[command & 0xFU];
+                                        : ead_tables::kShortGate[command & 0xFU];
             }
-
             break;
         }
     }
@@ -300,6 +313,7 @@ int EadLaterPlayer::LayerNote(int index, int command)
 
     layer.delay = static_cast<int16_t>(delay);
     layer.gate_delay = static_cast<int16_t>((layer.gate * int32_t{delay}) >> 8);
+
     if (channel.gate_random != 0)
     {
         VaryGate(layer, channel);
@@ -336,12 +350,14 @@ uint16_t EadLaterPlayer::ReadLargeNote(Layer& layer, const Player& player, int c
         layer.gate = Read8(player, script);
         layer.last_length = static_cast<int16_t>(delay);
         break;
+
     case 0x40:
         delay = ReadVariable(player, script);
         velocity = Read8(player, script);
         layer.gate = 0;
         layer.last_length = static_cast<int16_t>(delay);
         break;
+
     default:
         delay = static_cast<uint16_t>(layer.last_length);
         velocity = Read8(player, script);
@@ -371,9 +387,11 @@ uint16_t EadLaterPlayer::ReadSmallNote(Layer& layer, const Player& player, int c
         delay = ReadVariable(player, script);
         layer.last_length = static_cast<int16_t>(delay);
         break;
+
     case 0x40:
         delay = static_cast<uint16_t>(layer.default_length);
         break;
+
     default:
         delay = static_cast<uint16_t>(layer.last_length);
         break;
@@ -470,6 +488,7 @@ int EadLaterPlayer::LayerSound(int index, int command)
 
     layer.delay_copy = layer.delay;
     layer.frequency_scale *= layer.bend;
+
     if (layer.delay == 0)
     {
         SetSampleLength(layer, player);
@@ -497,6 +516,7 @@ bool EadLaterPlayer::SetDrumSound(Layer& layer, const Channel& channel, uint8_t 
                                    ? nullptr
                                    : &files_->banks[channel.font].envelopes[static_cast<std::size_t>(drum->envelope)];
     layer.adsr.release = drum->release_rate;
+
     if (!layer.ignore_drum_pan)
     {
         layer.pan = drum->pan;
@@ -600,11 +620,13 @@ bool EadLaterPlayer::StartPortamento(Layer& layer, const Channel& channel, const
         other = from_note;
         base = to_note;
         break;
+
     case 2:
     case 4:
         base = from_note;
         other = to_note;
         break;
+
     default:
         break;
     }
@@ -629,6 +651,7 @@ bool EadLaterPlayer::StartPortamento(Layer& layer, const Channel& channel, const
     layer.portamento.speed = static_cast<uint16_t>(speed);
     layer.portamento.position = 0;
     layer.frequency_scale = base;
+
     if (note_mode == 5)
     {
         layer.portamento_target = semitone;

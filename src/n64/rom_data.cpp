@@ -12,11 +12,11 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/inflate.h"
+#include "ntdlib/yaz0.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 
-#include "ntdlib/inflate.h"
-#include "ntdlib/yaz0.h"
 #include "ultralib/n64/bank_file.h"
 #include "ultralib/n64/ead_bank.h"
 #include "ultralib/n64/midi.h"
@@ -153,7 +153,7 @@ bool LaterBanksFit(std::span<const uint8_t> image, std::span<const uint8_t> tabl
             return false;
         }
 
-        // A bank starts with offsets that lie inside it, and a cheap look at them rejects most places.
+        // A bank starts with offsets that point inside it. A cheap look at them rejects most places.
         const uint32_t instruments = xsflib::LoadBe16(entry + 12) >> 8;
         const std::size_t words = std::min<std::size_t>(size / 4, 2 + instruments);
         bool any = instruments == 0;
@@ -213,7 +213,7 @@ bool LaterSequencesFit(std::span<const uint8_t> image, std::span<const uint8_t> 
     return true;
 }
 
-// The end of a table of each sequence's banks: the place after the set that lies last.
+// The end of a table of each sequence's banks: the place after the last set.
 std::size_t LaterBankSetsEnd(std::span<const uint8_t> bytes, std::size_t table, std::size_t sequence_count)
 {
     std::size_t end = table + sequence_count * 2;
@@ -319,7 +319,7 @@ EarlyTables FindEarlyTables(std::span<const uint8_t> image)
 
         const uint16_t count = xsflib::LoadBe16(image.data() + offset + 2);
 
-        // The first entry of the table lies just past it.
+        // The first entry of the table is just past it.
         const uint32_t first = xsflib::LoadBe32(image.data() + offset + 4);
         if (count < 2 || count > 512 || first < 4U + count * 8U || first > 4U + count * 8U + 16U ||
             !SeqFile::Matches(image.subspan(offset), revision))
@@ -436,7 +436,7 @@ std::vector<FileTableEntry> ReadFileTable(std::span<const uint8_t> image, std::s
 // exactly three tables.
 bool FindLaterTablesInCode(LaterSoundData& data)
 {
-    // The three tables lie in a row in the code: the banks', the sequences' and the samples'.
+    // The three tables are in a row in the code: the tables of the banks, the sequences and the samples.
     std::vector<std::size_t> tables;
     for (std::size_t offset = 0; offset + kTableHeaderSize < data.code.size(); offset += 16)
     {
@@ -456,7 +456,7 @@ bool FindLaterTablesInCode(LaterSoundData& data)
     data.sequence_table = tables[1];
     data.sample_table = tables[2];
 
-    // The table of each sequence's banks lies between the tables of banks and sequences.
+    // The table of each sequence's banks is between the tables of banks and sequences.
     std::size_t bank_count = 0;
     LooksLikeLaterTable(data.code, data.bank_table, bank_count);
     std::size_t sequence_count = 0;
@@ -635,7 +635,7 @@ std::optional<std::size_t> FindBankSamples(std::span<const uint8_t> image, const
     // Waves whose loops start at the same place keep the order of the bank on every platform.
     std::stable_sort(waves.begin(), waves.end(), earlier);
 
-    // Most of the time, the data lies on a multiple of 8 bytes and the first wave rules out every other place.
+    // Most of the time, the data starts on a multiple of 8 bytes and the first wave rules out every other place.
     const std::size_t checks = std::min(waves.size(), kLoopsChecked);
     for (std::size_t table = 0; table + kVadpcmFrameSize < image.size(); table += 8)
     {
@@ -686,7 +686,7 @@ std::optional<EarlySoundData> FindEarlySoundData(std::span<const uint8_t> image)
 
 std::optional<LaterSoundData> FindLaterSoundData(std::span<const uint8_t> image)
 {
-    // The file table: the image's first search for the boot code's entry that lies past the boot code.
+    // The file table: the image's first search for the boot code's entry past the boot code.
     const auto found = std::search(image.begin(), image.end(), std::begin(kFileTableStart), std::end(kFileTableStart));
     if (found == image.end())
     {
@@ -730,7 +730,7 @@ std::optional<LaterSoundData> FindLaterSoundData(std::span<const uint8_t> image)
             continue;
         }
 
-        // The files lie in the same order right after the first files of the table: the first plain file whose size
+        // The files are in the same order right after the first files of the table: the first plain file whose size
         // fits each table's sum.
         const auto banks = FileOfSize(files, last, LaterTableEnd(data.code, data.bank_table));
         const auto sequences = FileOfSize(files, last, LaterTableEnd(data.code, data.sequence_table));

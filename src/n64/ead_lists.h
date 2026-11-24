@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
 
-// The commands of EAD's audio microcodes, as the models of EAD's engines append them, and the big-endian halfwords that
-// the engines keep in the model's memory. A DMA command of these microcodes gives its size in bytes. The first form
-// (Mario Kart 64) has segments at opcode 7. The second and third forms (Ocarina of Time, Majora's Mask) have a filter
-// there, and more commands.
+// The commands of EAD's audio microcodes that the models of EAD's engines append, and the big-endian halfwords that the
+// engines keep in the model's memory. A DMA command of these microcodes gives its size in units of 16 bytes. The first
+// form (Mario Kart 64) has segments at opcode 7. The second and third forms (Ocarina of Time, Majora's Mask) have a
+// filter there, and more commands.
 
 #pragma once
 
 #include <array>
 #include <cstdint>
 
+#include "ntdlib/rounding.h"
+
+#include "ead_adpcm_pass.h"
+#include "ead_constants.h"
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
 
@@ -45,16 +49,6 @@ constexpr uint32_t kOpSave = 0x15;
 constexpr uint32_t kOpEnvSetup2 = 0x16;
 constexpr uint32_t kOpDecodeBytes = 0x17;
 constexpr uint32_t kOpNegate = 0x19;
-
-constexpr int Align8(int value)
-{
-    return (value + 7) & ~7;
-}
-
-constexpr int Align16(int value)
-{
-    return (value + 15) & ~15;
-}
 
 // A command's first word: the opcode, a byte and a halfword.
 inline uint32_t Word0(uint32_t opcode, uint32_t middle, uint32_t low)
@@ -101,6 +95,46 @@ inline void Mix(AudioList& list, uint32_t size, uint32_t gain, uint32_t in, uint
 inline void Resample(AudioList& list, uint32_t flags, uint32_t pitch, uint32_t state)
 {
     list.commands.push_back({Word0(kOpResample, flags, pitch), state});
+}
+
+inline void Halve(AudioList& list, uint32_t count, uint32_t in, uint32_t out)
+{
+    list.commands.push_back({(kOpHalve << 24) | (count & 0xFFFF), Pair(in, out)});
+}
+
+// The filter command of the second and third forms.
+inline void Filter(AudioList& list, uint32_t flags, uint32_t size_or_buffer, uint32_t address)
+{
+    list.commands.push_back({Word0(kOpFilter, flags, size_or_buffer), address});
+}
+
+// The place in DMEM of a pass's compressed frames: whole blocks of 16 bytes that end at `compressed_end`, with room
+// for the bytes before the first frame.
+inline uint32_t FramesPlace(const EadAdpcmPass& pass, int frame_size, uint32_t compressed_end)
+{
+    return compressed_end -
+           static_cast<uint32_t>(ntdlib::AlignUp(pass.frames * frame_size + ead_constants::kFrameSamples, 16));
+}
+
+// Loads the compressed frames of a pass to FramesPlace, from a sample at `sample_address` with frames of `frame_size`
+// bytes. Returns the bytes before the first frame in its block of 16 bytes.
+inline uint32_t LoadFrames(AudioList& list, uint32_t sample_address, int32_t position, const EadAdpcmPass& pass,
+                           int frame_size, uint32_t compressed_end)
+{
+    using ead_constants::kFrameSamples;
+
+    if (pass.frames == 0)
+    {
+        return 0;
+    }
+
+    const int frame = (position + kFrameSamples - pass.ignored_first) / kFrameSamples;
+    const uint32_t data = sample_address + static_cast<uint32_t>(frame * frame_size);
+    const uint32_t start_pad = data & 0xF;
+    const uint32_t place = FramesPlace(pass, frame_size, compressed_end);
+    Load(list, data - start_pad, place, compressed_end - place);
+
+    return start_pad;
 }
 
 inline void WriteBe16(AudioMemory& memory, uint32_t address, int16_t value)

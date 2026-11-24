@@ -6,9 +6,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
-#include <numbers>
 #include <utility>
 
+#include "ntdlib/sequence_export/conversion.h"
 #include "seqlib/loop.h"
 #include "seqlib/midi/performance_writer.h"
 #include "seqlib/sf2/presets.h"
@@ -19,7 +19,6 @@
 #include "seqlib/sfz/text.h"
 #include "seqlib/wav.h"
 
-#include "ntdlib/sequence_export/conversion.h"
 #include "ultralib/sequence_export/n64/resampler_low_pass.h"
 
 namespace ultralib::sequence_export::n64
@@ -35,47 +34,44 @@ using seqlib::sfz::Number;
 // A zone's pan at either side, in tenths of a percent, in SoundFont's pan generator.
 constexpr double kPanRange = 500.0;
 
-// The fall in decibels that SoundFont's decay and release times count, and that the documentation of SFZ's count: a
-// factor of e^-8.
-constexpr double kSoundFontFallDb = 100.0;
-constexpr double kSfzFallDb = 8.0 * 20.0 / std::numbers::ln10;
-
-// SoundFont's limits on the times, in timecents.
-constexpr int kShortestTimecents = -12000;
-constexpr int kLongestTimecents = 8000;
-constexpr int kLongestHoldTimecents = 5000;
-
 // The attenuation in centibels from which a sustain counts as silence.
-constexpr int kSilentCentibels = 1000;
+constexpr int kSilentSustainCentibels = 1000;
 
 // A fall in SFZ's time, in seconds.
 double SfzFall(double soundfont_ms)
 {
-    return soundfont_ms / 1000.0 * kSfzFallDb / kSoundFontFallDb;
+    return soundfont_ms / 1000.0 * sfz::kEnvelopeFallDb / sf2::kEnvelopeFallDb;
 }
 
 int Timecents(double ms, int longest)
 {
-    return sf2::ToTimecents(ms, kShortestTimecents, longest);
+    return sf2::ToTimecents(ms, sf2::kShortestTimecents, longest);
 }
 
-// The instrument's global zone holds seqlib's kGlobalZoneModulators. The Nintendo 64's engines don't filter by
-// velocity. A pitch wheel covers its full range. CC10 pans at the amount of 500 that most synthesizers play. The mod
-// wheel moves nothing: SoundFont's default CC1 modulator would add 50 cents of vibrato.
+// The global zone of each instrument contains seqlib's kGlobalZoneModulatorsNoModVibrato. The Nintendo 64's engines
+// don't filter by velocity. A pitch wheel covers its full range. CC10 pans at the amount of 500 that most synthesizers
+// play. The mod wheel moves nothing: SoundFont's default CC1 modulator would add 50 cents of vibrato.
 sf2::Zone GlobalZone()
 {
     sf2::Zone global;
-    global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
-    global.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, 0, 0});
+    global.modulators.assign(sf2::kGlobalZoneModulatorsNoModVibrato.begin(),
+                             sf2::kGlobalZoneModulatorsNoModVibrato.end());
 
     return global;
 }
 
-// The SoundFont's samples: each wave once, through the resampler's low-pass.
+// The samples of `wave` that the files contain: through the resampler's low-pass with `resampler_filter`, or as the
+// game decodes them without it.
+seqlib::Pcm FileSamples(const Wave& wave, bool resampler_filter)
+{
+    return resampler_filter ? ApplyResamplerLowPass(wave.pcm) : wave.pcm;
+}
+
+// The SoundFont's samples: each wave once, through the resampler's low-pass with `resampler_filter`.
 class SoundFontSamples
 {
 public:
-    explicit SoundFontSamples(sf2::SoundFont& sf) : sf_(sf)
+    SoundFontSamples(sf2::SoundFont& sf, bool resampler_filter) : sf_(sf), resampler_filter_(resampler_filter)
     {
     }
 
@@ -89,7 +85,7 @@ public:
         }
 
         const std::vector<uint16_t> added = sf2::AddSamples(
-            sf_, seqlib::PrepareForSoundFont(ApplyResamplerLowPass(wave.pcm)), wave.name, wave.rate, 60);
+            sf_, seqlib::PrepareForSoundFont(FileSamples(wave, resampler_filter_)), wave.name, wave.rate, 60);
         ids_[wave.name] = added.at(0);
         loops = wave.pcm.loop;
 
@@ -98,6 +94,7 @@ public:
 
 private:
     sf2::SoundFont& sf_;
+    bool resampler_filter_;
     std::map<std::string, uint16_t> ids_;
 };
 
@@ -112,14 +109,14 @@ sf2::Zone SoundFontZone(const Zone& z, uint16_t sample, bool loop, double quiete
     values.pan = static_cast<int>(std::lround(z.pan * kPanRange));
     if (z.delay_ms > 0.0)
     {
-        values.delay = Timecents(z.delay_ms, kLongestHoldTimecents);
+        values.delay = Timecents(z.delay_ms, sf2::kLongestHoldTimecents);
     }
 
-    values.attack = Timecents(z.attack_ms, kLongestTimecents);
-    values.hold = Timecents(z.hold_ms, kLongestHoldTimecents);
-    values.decay = Timecents(z.decay_ms, kLongestTimecents);
-    values.sustain = std::clamp(static_cast<int>(std::lround(z.sustain_db * 10.0)), 0, kSilentCentibels);
-    values.release = Timecents(z.release_ms, kLongestTimecents);
+    values.attack = Timecents(z.attack_ms, sf2::kLongestTimecents);
+    values.hold = Timecents(z.hold_ms, sf2::kLongestHoldTimecents);
+    values.decay = Timecents(z.decay_ms, sf2::kLongestTimecents);
+    values.sustain = std::clamp(static_cast<int>(std::lround(z.sustain_db * 10.0)), 0, kSilentSustainCentibels);
+    values.release = Timecents(z.release_ms, sf2::kLongestTimecents);
     values.root_key = z.root_key;
     values.exclusive_class = z.exclusive_class;
     values.coarse_tune = cents / 100;
@@ -142,7 +139,7 @@ sf2::Zone SoundFontZone(const Zone& z, uint16_t sample, bool loop, double quiete
     {
         if (z.vibrato->delay_ms > 0.0)
         {
-            sf2::AddGenerator(zone, sf2::kDelayVibLfo, Timecents(z.vibrato->delay_ms, kLongestHoldTimecents));
+            sf2::AddGenerator(zone, sf2::kDelayVibLfo, Timecents(z.vibrato->delay_ms, sf2::kLongestHoldTimecents));
         }
 
         sf2::AddGenerator(zone, sf2::kFreqVibLfo, sf2::LfoFrequency(z.vibrato->hz));
@@ -161,7 +158,7 @@ sf2::Zone SoundFontZone(const Zone& z, uint16_t sample, bool loop, double quiete
     {
         if (z.tremolo->delay_ms > 0.0)
         {
-            sf2::AddGenerator(zone, sf2::kDelayModLfo, Timecents(z.tremolo->delay_ms, kLongestHoldTimecents));
+            sf2::AddGenerator(zone, sf2::kDelayModLfo, Timecents(z.tremolo->delay_ms, sf2::kLongestHoldTimecents));
         }
 
         sf2::AddGenerator(zone, sf2::kFreqModLfo, sf2::LfoFrequency(z.tremolo->hz));
@@ -179,7 +176,8 @@ sf2::Zone SoundFontZone(const Zone& z, uint16_t sample, bool loop, double quiete
     return zone;
 }
 
-// The SFZ files' samples of a sequence: each wave once, through the resampler's low-pass, as a WAV file.
+// The SFZ files' samples of a sequence: each wave once, through the resampler's low-pass with `resampler_filter`, as a
+// WAV file.
 class SfzSamples
 {
 public:
@@ -192,6 +190,10 @@ public:
         uint32_t loop_end = 0; // the loop's last sample
     };
 
+    explicit SfzSamples(bool resampler_filter) : resampler_filter_(resampler_filter)
+    {
+    }
+
     const File& Get(const Wave& wave)
     {
         const auto found = files_.find(wave.name);
@@ -201,11 +203,11 @@ public:
         }
 
         // sfizz's crossfade of a loop spans at least 1 ms. 4 ms of repeated loop data before the loop's start makes it
-        // inaudible. A wave without a loop goes out as the filter leaves it.
-        seqlib::Pcm out = ApplyResamplerLowPass(wave.pcm);
+        // inaudible. A wave without a loop goes out as FileSamples leaves it.
+        seqlib::Pcm out = FileSamples(wave, resampler_filter_);
         if (out.loop)
         {
-            const seqlib::PreparedWave prepared = seqlib::PrepareForSfz(out, (wave.rate * 4 + 999) / 1000);
+            const seqlib::PreparedWave prepared = seqlib::PrepareForSfz(out, seqlib::SfzLoopCrossfade(wave.rate));
             out.channels = prepared.channels;
             out.loop = prepared.loop;
             out.loop_start = prepared.loop_start;
@@ -228,6 +230,7 @@ public:
     }
 
 private:
+    bool resampler_filter_;
     std::map<std::string, File> files_;
     std::vector<sfz::Sample> samples_;
 };
@@ -259,10 +262,7 @@ std::string SfzRegion(const Zone& z, const SfzSamples::File& file, double gain_d
     s += sfz::TuneOpcodes(static_cast<int>(std::lround(z.tune_cents)));
     const double volume =
         20.0 * std::log10(std::max(z.gain, 1e-7)) + gain_db - (z.tremolo && !z.tremolo->wheel ? z.tremolo->depth : 0.0);
-    if (std::abs(volume) >= 0.005)
-    {
-        s += " volume=" + Number(volume, 2);
-    }
+    s += sfz::VolumeOpcode(volume);
 
     if (std::abs(z.pan) >= 0.0005)
     {
@@ -306,7 +306,7 @@ double LoudestZone(const Performance& performance)
     double loudest = 0.0;
     for (const std::vector<seqlib::midi::TrackEvent>& track : performance.tracks)
     {
-        // A part plays preset 0 until it sends another, as a player does.
+        // A player plays preset 0 on a part until the part sends another.
         std::map<uint8_t, uint32_t> presets;
         for (const seqlib::midi::TrackEvent& event : track)
         {
@@ -338,7 +338,8 @@ double LoudestZone(const Performance& performance)
 }
 
 sfz::Instruments BuildSfz(const Performance& performance, const seqlib::midi::MidiReport& midi,
-                          const std::string& title, const std::vector<std::string>& names, const std::string& program)
+                          const std::string& title, const std::vector<std::string>& names, const std::string& program,
+                          bool resampler_filter)
 {
     sfz::TrackFileOptions options;
     options.title = title;
@@ -347,7 +348,7 @@ sfz::Instruments BuildSfz(const Performance& performance, const seqlib::midi::Mi
     options.presets = performance.presets.size();
     options.level_cut_db = performance.level_cut_db;
 
-    SfzSamples samples;
+    SfzSamples samples(resampler_filter);
     auto text = [&](int)
     {
         sfz::TrackText added;
@@ -376,10 +377,11 @@ sfz::Instruments BuildSfz(const Performance& performance, const seqlib::midi::Mi
 
 double Centibels(double amplitude)
 {
-    return amplitude <= 0.0 ? 1440.0 : -200.0 * std::log10(amplitude);
+    return amplitude <= 0.0 ? double{sf2::kMaxCentibels} : -200.0 * std::log10(amplitude);
 }
 
-Conversion BuildFiles(Performance performance, const std::string& title, const std::string& program)
+Conversion BuildFiles(Performance performance, const std::string& title, const std::string& program,
+                      bool resampler_filter)
 {
     Conversion c;
     c.performance = std::move(performance);
@@ -387,7 +389,7 @@ Conversion BuildFiles(Performance performance, const std::string& title, const s
 
     const double quieter = ntdlib::sequence_export::CutAboveFullLevel(c, LoudestZone(c.performance));
     sf2::SoundFont sf;
-    SoundFontSamples samples(sf);
+    SoundFontSamples samples(sf, resampler_filter);
     std::vector<std::string> names;
     for (std::size_t i = 0; i < c.performance.presets.size(); i++)
     {
@@ -413,7 +415,7 @@ Conversion BuildFiles(Performance performance, const std::string& title, const s
     }
 
     ntdlib::sequence_export::WriteSoundFont(c, sf, title, "Converted by " + program + ": " + title, program);
-    c.sfz = BuildSfz(c.performance, midi, title, names, program);
+    c.sfz = BuildSfz(c.performance, midi, title, names, program, resampler_filter);
     ntdlib::sequence_export::CollectWarnings(c, midi, builder_warnings, {});
 
     return c;

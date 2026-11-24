@@ -3,24 +3,24 @@
 #include "ultralib/sequence_export/n64/libmus.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <cstdio>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "seqlib/midi/recorder.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 
-#include "ntdlib/inflate.h"
-#include "ntdlib/yay0.h"
-#include "ultralib/n64/bank_file.h"
-#include "ultralib/n64/vadpcm.h"
-#include "ultralib/sequence_export/n64/envelope.h"
-#include "ultralib/sequence_export/n64/libultra.h"
+#include "libmus_shared.h"
+#include "n64/mus_player_common.h"
+#include "rsp_audio.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -28,75 +28,30 @@ namespace ultralib::sequence_export::n64
 namespace
 {
 
-namespace n64 = ultralib::n64;
 namespace midi = seqlib::midi;
+using libmus::kHighestVoiceVolume;
+using libmus::kKeyOfNote;
+using libmus::kTopSteps;
+using libmus::kVolumeShift;
+using ultralib::n64::mus_player_common::kDefaultBendRange;
+using ultralib::n64::mus_player_common::kDrumSize;
+using ultralib::n64::mus_player_common::kEndlessLength;
+using ultralib::n64::mus_player_common::kEnvelopeRelease;
+using ultralib::n64::mus_player_common::kEnvelopeSize;
+using ultralib::n64::mus_player_common::kForever;
+using ultralib::n64::mus_player_common::kMostCommandsInAStep;
+using ultralib::n64::mus_player_common::kRest;
+using ultralib::n64::mus_player_common::kVibratoUnitsPerSemitone;
+using enum ultralib::n64::mus_player_common::Command;
 
-// The commands of a song's lists. A byte below these is a note.
-enum Command : uint8_t
-{
-    kStop = 0x80,
-    kWave = 0x81,
-    kPortamento = 0x82,
-    kPortamentoOff = 0x83,
-    kEnvelopeBytes = 0x84,
-    kTempo = 0x85,
-    kCutoff = 0x86,
-    kEndIt = 0x87,
-    kVibratoUp = 0x88,
-    kVibratoDown = 0x89,
-    kVibratoOff = 0x8A,
-    kLength = 0x8B,
-    kIgnoreLength = 0x8C,
-    kTranspose = 0x8D,
-    kIgnoreTranspose = 0x8E,
-    kDistort = 0x8F,
-    kEnvelope = 0x90,
-    kEnvelopeOff = 0x91,
-    kEnvelopeOn = 0x92,
-    kTriggerOff = 0x93,
-    kTriggerOn = 0x94,
-    kFor = 0x95,
-    kNext = 0x96,
-    kWobble = 0x97,
-    kWobbleOff = 0x98,
-    kVelocityOn = 0x99,
-    kVelocityOff = 0x9A,
-    kDefaultVelocity = 0x9B,
-    kPan = 0x9C,
-    kStereo = 0x9D,
-    kDrums = 0x9E,
-    kDrumsOff = 0x9F,
-    kPrint = 0xA0,
-    kGoto = 0xA1,
-    kReverb = 0xA2,
-    kRandomNote = 0xA3,
-    kRandomVolume = 0xA4,
-    kRandomPan = 0xA5,
-    kVolume = 0xA6,
-    kStartEffect = 0xA7,
-    kBendRange = 0xA8,
-    kSweep = 0xA9,
-    kChangeEffect = 0xAA,
-    kMarker = 0xAB,
-    kLengthOff = 0xAC,
-};
-
-// A For with this count repeats for ever.
-constexpr uint8_t kForever = 0xFF;
-
-// The player keeps this many loops open.
-constexpr std::size_t kForDepth = 4;
-
-constexpr int kRest = 96;
+// The loops that a channel can have open at once.
+constexpr auto kForDepth = static_cast<std::size_t>(ultralib::n64::MusChannel::kForDepth);
 
 // The scale of a song's tempo that changes nothing.
 constexpr int kFullTempoScale = 128;
 
-// A note of this length plays until the channel stops.
-constexpr int kEndlessLength = 0x7FFF;
-
-// The player's callbacks a second, as its tempos count them. The player asks for its next callback in this many
-// microseconds. The synthesizer rounds that to whole samples.
+// The player's callbacks a second. The tempos of the player count callbacks. The player asks for its next callback in
+// this many microseconds. The synthesizer rounds that to whole samples.
 constexpr int kCallbacksPerSecond = 60;
 constexpr double kCallbackMicroseconds = 1000000 / kCallbacksPerSecond;
 
@@ -112,41 +67,11 @@ constexpr uint32_t kTicksPerQuarter = 48;
 // The highest ratio of a wave's rate to the output's. A higher note is silent.
 constexpr double kHighestSemitones = 12.0;
 
-// The library's name for a note of 48 is C4, which is key 60 in MIDI.
-constexpr int kKeyOfNote = 12;
-
-// The player's volume above which the voice's volume stops.
-constexpr int kHighestVoiceVolume = 32767;
-constexpr int kVolumeShift = 13;
-
 // A voice's volume stops at its top while volume * envelope * velocity * song volume is this or more.
 constexpr int64_t kFullVoiceProduct = int64_t{kHighestVoiceVolume + 1} << kVolumeShift;
 
 // What's sent to each song's channels. The player shares its 16 MIDI tracks among them.
 constexpr std::size_t kMidiTracks = 16;
-
-// In the later player, a channel keeps one voice, and a new note cuts the last one (the code at 0x80054988 and
-// 0x80054B04 in Gex 64). Every zone therefore cuts the last note of its channel. In the early player, a channel sends
-// its sounding voice into its release and allocates a new voice for the next note (the code at 0x8003AE98 and
-// 0x8003B3F4 in Pokémon Stadium). Its zones cut nothing.
-constexpr int kChannelClass = 1;
-
-// A cut that takes this many commands without a tick has no end.
-constexpr int kMostCommandsInATick = 100000;
-
-constexpr double kFullVoice = 32768.0;
-
-// A vibrato's amount counts fiftieths of a semitone.
-constexpr double kVibratoUnitsPerSemitone = 50.0;
-
-// The bend range that a channel starts with. The early player sets it again at each new pass of a loop.
-constexpr double kDefaultBendRange = 2.0 / 64.0;
-
-// A note of the early player starts at its peak if its attack takes less than this.
-constexpr int kShortestEarlyAttack = 2;
-
-// A preset's `top` counts this many steps for each step of an envelope's bytes.
-constexpr int kTopSteps = 256;
 
 constexpr double kPi = 3.14159260000000007;
 
@@ -154,7 +79,7 @@ constexpr double kPi = 3.14159260000000007;
 constexpr uint64_t kLongestLoopEnd = 200000000;
 
 // The highest of an envelope's three levels.
-int TopOfEnvelope(const std::array<uint8_t, 7>& envelope)
+int TopOfEnvelope(const std::array<uint8_t, kEnvelopeSize>& envelope)
 {
     return std::max({envelope[1], envelope[3], envelope[5]});
 }
@@ -293,9 +218,8 @@ struct Action
     LibmusPresetKey preset;
 };
 
-// Where each of an envelope's bytes is.
+// The place of an envelope's first byte.
 constexpr std::size_t kEnvelopeFirst = 1;
-constexpr std::size_t kEnvelopeRelease = 6;
 
 // How a channel's list goes: the lists hold the settings that a note takes when it starts.
 class ChannelReader
@@ -418,7 +342,7 @@ private:
     int pan_ = 64;
     int transpose_ = 0;
     bool ignore_transpose_ = false;
-    std::array<uint8_t, 7> envelope_ = {1, 0, 1, 127, 255, 127, 15};
+    std::array<uint8_t, kEnvelopeSize> envelope_ = {1, 0, 1, 127, 255, 127, 15};
     int cutoff_ = 0;
     int end_it_ = 0;
     int volume_ = 127;
@@ -473,44 +397,53 @@ bool ChannelReader::RunCommand(uint8_t command)
     case kStop:
         stopped_ = true;
         return false;
+
     case kWave:
         wave_ = Sized();
         break;
+
     case kPortamento:
         portamento_ = file_.At(place_++);
         if (portamento_ != 0)
         {
             portamento_base_ = note_pitch_;
         }
-
         break;
+
     case kPortamentoOff:
         portamento_ = 0;
         break;
+
     case kVibratoOff:
         vibrato_speed_ = 0;
         vibrato_ = 0.0;
         break;
+
     case kWobbleOff:
     case kEnvelopeOn:
     case kTriggerOn:
         break;
+
     case kEnvelopeBytes:
         SetEnvelope(place_);
         place_ += envelope_.size();
         break;
+
     case kTempo:
         tempos_.emplace_back(note_end_, TempoOfScript(file_.At(place_++)));
         break;
+
     case kCutoff:
         cutoff_ = (file_.At(place_) << 8) | file_.At(place_ + 1);
         place_ += 2;
         end_it_ = 0;
         break;
+
     case kEndIt:
         end_it_ = file_.At(place_++);
         cutoff_ = 0;
         break;
+
     case kVibratoUp:
     case kVibratoDown:
         vibrato_delay_ = file_.At(place_);
@@ -518,18 +451,23 @@ bool ChannelReader::RunCommand(uint8_t command)
         vibrato_amount_ = (command == kVibratoUp ? 1.0 : -1.0) * file_.At(place_ + 2) / kVibratoUnitsPerSemitone;
         place_ += 3;
         break;
+
     case kLength:
         fixed_length_ = Sized();
         break;
+
     case kIgnoreLength:
         ignore_length_ = true;
         break;
+
     case kTranspose:
         transpose_ = static_cast<int8_t>(file_.At(place_++));
         break;
+
     case kIgnoreTranspose:
         ignore_transpose_ = true;
         break;
+
     case kDistort:
         if (file_.At(place_) != 0)
         {
@@ -538,15 +476,19 @@ bool ChannelReader::RunCommand(uint8_t command)
 
         place_++;
         break;
+
     case kEnvelope:
-        SetEnvelope(file_.envelopes + std::size_t{7} * static_cast<std::size_t>(Sized()));
+        SetEnvelope(file_.envelopes + std::size_t{kEnvelopeSize} * static_cast<std::size_t>(Sized()));
         break;
+
     case kEnvelopeOff:
         recorder_.Approximate("a note that keeps the last note's envelope");
         break;
+
     case kTriggerOff:
         recorder_.Approximate("a note that keeps the last note's sample");
         break;
+
     case kFor:
         {
             if (fors_.size() >= kForDepth)
@@ -560,9 +502,9 @@ bool ChannelReader::RunCommand(uint8_t command)
             {
                 loop_start_ = note_end_;
             }
-
             break;
         }
+
     case kNext:
         {
             if (fors_.empty())
@@ -608,6 +550,7 @@ bool ChannelReader::RunCommand(uint8_t command)
             bend_semitones_ = bend_ * bend_range_;
             break;
         }
+
     case kWobble:
         if (file_.At(place_) != 0 && file_.At(place_ + 1) != 0)
         {
@@ -616,31 +559,40 @@ bool ChannelReader::RunCommand(uint8_t command)
 
         place_ += 3;
         break;
+
     case kVelocityOn:
         velocity_on_ = true;
         break;
+
     case kVelocityOff:
         velocity_on_ = false;
         break;
+
     case kDefaultVelocity:
         default_velocity_ = file_.At(place_++);
         velocity_on_ = false;
         break;
+
     case kPan:
         pan_ = file_.At(place_++) / 2;
         break;
+
     case kStereo:
         place_ += 2;
         break;
+
     case kDrums:
-        drums_ = file_.drums + uint32_t{6} * static_cast<uint32_t>(Sized());
+        drums_ = file_.drums + kDrumSize * static_cast<uint32_t>(Sized());
         break;
+
     case kDrumsOff:
         drums_.reset();
         break;
+
     case kPrint:
         place_++;
         break;
+
     case kGoto:
         {
             const std::size_t to = static_cast<std::size_t>((file_.At(place_) << 8) | file_.At(place_ + 1));
@@ -653,21 +605,26 @@ bool ChannelReader::RunCommand(uint8_t command)
             bend_repeat_ = 1;
             break;
         }
+
     case kReverb:
         reverb_ = file_.At(place_++);
         break;
+
     case kRandomNote:
     case kRandomVolume:
     case kRandomPan:
         skip(2, "random values");
         break;
+
     case kVolume:
         volume_ = file_.At(place_++);
         break;
+
     case kStartEffect:
         Sized();
         recorder_.Approximate("a song's start of a sound effect left out");
         break;
+
     case kBendRange:
         bend_range_ = file_.At(place_++) / 64.0;
 
@@ -675,6 +632,7 @@ bool ChannelReader::RunCommand(uint8_t command)
         // early player of Pokémon Stadium and the later player of Gex 64 (the code at 0x800538FC).
         bend_semitones_ = file_.early ? bend_ * bend_ : bend_ * bend_range_;
         break;
+
     case kSweep:
         if (file_.At(place_) != 0)
         {
@@ -683,16 +641,20 @@ bool ChannelReader::RunCommand(uint8_t command)
 
         place_++;
         break;
+
     case kChangeEffect:
         skip(1, "a change of the effect");
         break;
+
     case kMarker:
         place_++;
         Sized();
         break;
+
     case kLengthOff:
         fixed_length_ = 0;
         break;
+
     default:
         throw xsflib::FormatError("a song holds an unknown command");
     }
@@ -786,10 +748,10 @@ void ChannelReader::StartNote(int note)
 
     if (drums_)
     {
-        const std::size_t at = *drums_ + std::size_t{6} * static_cast<std::size_t>(note);
+        const std::size_t at = *drums_ + std::size_t{kDrumSize} * static_cast<std::size_t>(note);
         wave_ = (file_.At(at) << 8) | file_.At(at + 1);
         const std::size_t envelope =
-            file_.envelopes + std::size_t{7} * ((std::size_t{file_.At(at + 2)} << 8) | file_.At(at + 3));
+            file_.envelopes + std::size_t{kEnvelopeSize} * ((std::size_t{file_.At(at + 2)} << 8) | file_.At(at + 3));
         pan_ = file_.At(at + 4) / 2;
         note = file_.At(at + 5);
         for (std::size_t i = 0; i < envelope_.size(); i++)
@@ -855,6 +817,7 @@ void ChannelReader::StartNote(int note)
     // A silent note still cuts the last note. The lowest velocity keeps that.
     action.velocity = static_cast<uint8_t>(std::clamp(heard, 1, 127));
     action.pan = static_cast<uint8_t>(std::clamp(pan_, 0, 127));
+
     // The game's reverb base raises every level the song sets toward full.
     const int base = settings_.reverb_base;
     const int effect = (base + (128 - base) * reverb_ / 128) & 0xFF;
@@ -873,7 +836,7 @@ void ChannelReader::StartNote(int note)
     }
     else
     {
-        // A MIDI note needs a tick to sound. A note whose release starts at once gets that.
+        // A MIDI note sounds only when it lasts a tick or more. A note whose release starts at once gets one tick.
         off_tick_ = std::max(note_end_ - std::min(static_cast<uint32_t>(end_it_), note_end_), start + 1);
     }
 }
@@ -881,7 +844,7 @@ void ChannelReader::StartNote(int note)
 void ChannelReader::Step()
 {
     // The commands up to the next note, and the note.
-    for (int i = 0; i < kMostCommandsInATick; i++)
+    for (int i = 0; i < kMostCommandsInAStep; i++)
     {
         const uint8_t byte = file_.At(place_++);
         if (byte < 0x80)
@@ -984,8 +947,9 @@ double ChannelReader::PitchOfNoteAt(uint32_t tick)
     {
         if (settings_.early_player)
         {
-            // The early player's count wraps before the delay's end. That holds the pitch at one value up to there. A
-            // float keeps the value that the game's sinf takes.
+            // The early player's count wraps before the delay's end, to near 2^32. A float keeps the argument that the
+            // game's sinf takes. For a speed up to 100, the argument is 2^28 or more, and the game's sinf returns 0.
+            // std::sin returns another value there.
             const uint32_t count = ticks - static_cast<uint32_t>(vibrato_delay_);
             if (count != 0)
             {
@@ -1080,7 +1044,7 @@ void ChannelReader::RunToLoop()
     }
 }
 
-// Scales a song's tempos, as the game's code does a few frames after it starts the song. The library multiplies in
+// Scales a song's tempos the way the game's code does a few frames after it starts the song. The library multiplies in
 // whole numbers.
 void ScaleTempos(std::vector<std::pair<uint32_t, int>>& tempos, const LibmusSettings& settings)
 {
@@ -1088,53 +1052,6 @@ void ScaleTempos(std::vector<std::pair<uint32_t, int>>& tempos, const LibmusSett
     {
         tempo = tempo * settings.tempo_scale / kFullTempoScale;
     }
-}
-
-// Cuts `shape` off at the level `top`: every higher level plays as `top`. The shape then stays at `top` from where its
-// rise crosses that level to where its fall does. That stretch is taken out of the shape's updates, and its length goes
-// in `held_updates`. A SoundFont's hold takes it.
-void ClipShape(EnvelopeShape& shape, double top)
-{
-    std::vector<EnvelopePoint> clipped;
-    for (std::size_t i = 0; i < shape.points.size(); i++)
-    {
-        const EnvelopePoint& point = shape.points[i];
-        if (i > 0 && (shape.points[i - 1].level - top) * (point.level - top) < 0.0)
-        {
-            const EnvelopePoint& last = shape.points[i - 1];
-            const double share = (top - last.level) / (point.level - last.level);
-            clipped.push_back({last.updates + (point.updates - last.updates) * share, top});
-        }
-
-        clipped.push_back({point.updates, std::min(point.level, top)});
-    }
-
-    const auto at_top = [&](const EnvelopePoint& point)
-    {
-        return point.level >= top;
-    };
-
-    // A shape that ends at the top holds the note there, and nothing follows the stretch.
-    const auto first = std::find_if(clipped.begin(), clipped.end(), at_top);
-    const auto after = std::find_if_not(first, clipped.end(), at_top);
-    double stretch = 0.0;
-    if (first != clipped.end())
-    {
-        if (after != clipped.end())
-        {
-            stretch = std::prev(after)->updates - first->updates;
-        }
-
-        for (auto point = after; point != clipped.end(); ++point)
-        {
-            point->updates -= stretch;
-        }
-
-        clipped.erase(std::next(first), after);
-    }
-
-    shape.points = std::move(clipped);
-    shape.held_updates = stretch;
 }
 
 // What a pass of a channel plays, from tick `from` for `length` ticks: its notes, their ends, and the pitch and volume
@@ -1179,14 +1096,16 @@ std::vector<Action> HeardInPass(std::vector<Action> actions, uint32_t from, uint
                     heard.push_back(action);
                     sounding--;
                 }
-
                 break;
+
             case Action::Kind::kVolume:
                 volume = action.velocity;
                 break;
+
             case Action::Kind::kBend:
                 pitch = action.semitones;
                 break;
+
             case Action::Kind::kNote:
                 heard.push_back(action);
                 sounding++;
@@ -1498,9 +1417,11 @@ LibmusPerformance PerformLibmus(std::span<const uint8_t> song, std::span<const d
             case Action::Kind::kVolume:
                 recorder.SendSetting(performance, output, action.tick, midi::EventKind::kVolume, action.velocity);
                 break;
+
             case Action::Kind::kBend:
                 recorder.SendPitch(performance, output, action.tick, action.semitones);
                 break;
+
             case Action::Kind::kNote:
                 {
                     recorder.SendPreset(performance, output, action.tick,
@@ -1510,13 +1431,13 @@ LibmusPerformance PerformLibmus(std::span<const uint8_t> song, std::span<const d
 
                     // The mixer takes the send's share from the dry level, on the sin/cos law. The controller acts
                     // squared.
-                    const double dry = std::cos(kPi / 2.0 * action.reverb / 127.0);
                     recorder.SendSetting(performance, output, action.tick, midi::EventKind::kExpression,
-                                         static_cast<uint8_t>(std::lround(127.0 * std::sqrt(dry))));
+                                         static_cast<uint8_t>(std::lround(127.0 * std::sqrt(DryShare(action.reverb)))));
                     const uint32_t id = recorder.NoteOn(performance, output, action.tick, action.key, action.velocity);
                     started[{entry.channel, action.note}] = {action.key, id};
                     break;
                 }
+
             case Action::Kind::kOff:
                 {
                     const auto& [key, id] = started.at({entry.channel, action.note});
@@ -1529,8 +1450,7 @@ LibmusPerformance PerformLibmus(std::span<const uint8_t> song, std::span<const d
 
     if (loops)
     {
-        midi::ClampNoteOffs(performance, end_tick);
-        midi::CutAt(performance, end_tick);
+        midi::EndPassAt(performance, end_tick);
         performance.loop = midi::Performance::Loop{loop_start, end_tick};
         performance.loops = options.loops;
     }
@@ -1541,574 +1461,6 @@ LibmusPerformance PerformLibmus(std::span<const uint8_t> song, std::span<const d
     performance.warnings = recorder.Warnings();
 
     return out;
-}
-
-Zone LibmusZone(const LibmusPresetKey& key, double detune, const LibmusSettings& settings, double ticks_per_second)
-{
-    Zone zone;
-    zone.exclusive_class = settings.early_player ? 0 : kChannelClass;
-
-    // A key's pitch is key - kKeyOfNote + detune semitones above the output's rate.
-    const int root = static_cast<int>(std::lround(kKeyOfNote - detune));
-    zone.root_key = std::clamp(root, 0, 127);
-    zone.tune_cents = 100.0 * (zone.root_key - kKeyOfNote + detune);
-
-    // The lines between the bytes, on a scale of 127. The later player counts an envelope's times in units of its
-    // speed. Gex 64's speed command at 0x80053048 stores 0x400 / speed, and the code at 0x80054F48 scales the ticks by
-    // it. A decay's count starts where the attack's stops, less the attack's units. The early player counts ticks.
-    const auto [speed, first_byte, attack, peak, decay, sustain, release] = key.envelope;
-    const double unit = settings.early_player ? 1.0 : std::max<int>(speed, 1);
-    const int first = settings.early_player && attack < kShortestEarlyAttack ? peak : first_byte;
-    const double top_ticks = std::max<int>(attack, 1) * unit;
-    const double decay_end = std::max<int>(attack, 1) + std::max<int>(decay, 1) * unit;
-
-    EnvelopeShape shape;
-    shape.squared_lines = true;
-    shape.points.push_back({0.0, first / 127.0});
-    shape.points.push_back({top_ticks, peak / 127.0});
-    if (decay_end > top_ticks)
-    {
-        shape.points.push_back({decay_end, sustain / 127.0});
-    }
-    else if (unit > 1.0)
-    {
-        // A slow attack ends after the decay's count has run out, and the envelope steps from the peak to the sustain
-        // (the code at 0x80054FA8 in Gex 64). One tick stands for the step.
-        shape.points.push_back({top_ticks + 1.0, sustain / 127.0});
-    }
-
-    if (key.top != 0)
-    {
-        ClipShape(shape, key.top / (127.0 * kTopSteps));
-    }
-
-    const double level = FitEnvelope(zone, shape, ticks_per_second, 0.0);
-    zone.hold_ms = shape.held_updates * 1000.0 / ticks_per_second;
-    zone.release_ms = kSquaredLineTo100Db * std::max<int>(release, 1) * unit * 1000.0 / ticks_per_second;
-
-    // Each byte counts out of 127, and the volumes' product over 2^13 counts out of 32768.
-    const double full = 127.0 * 127.0 * 127.0 * settings.song_volume / static_cast<double>(1 << kVolumeShift) /
-                        kFullVoice * (settings.master_volume / kFullVoice);
-    zone.gain = level * full * full;
-
-    return zone;
-}
-
-std::vector<uint8_t> UnpackDirectoryFile(std::span<const uint8_t> file)
-{
-    constexpr std::size_t kHeaderSize = 4;
-    constexpr uint8_t kPacked = 1;
-    constexpr int kItemsInGroup = 8;
-    constexpr std::size_t kLongLength = 0x11;
-    if (file.size() < kHeaderSize || file[0] != kPacked)
-    {
-        throw xsflib::FormatError("a file of the directory isn't packed");
-    }
-
-    std::size_t at = kHeaderSize;
-    const auto next = [&]() -> uint8_t
-    {
-        if (at >= file.size())
-        {
-            throw xsflib::FormatError("a packed file stops before its end");
-        }
-
-        return file[at++];
-    };
-
-    const std::size_t size = std::size_t{file[1]} << 16 | std::size_t{file[2]} << 8 | file[3];
-    std::vector<uint8_t> out;
-    out.reserve(size);
-    while (true)
-    {
-        const uint8_t flags = next();
-        for (int item = kItemsInGroup - 1; item >= 0; item--)
-        {
-            if (((flags >> item) & 1) == 0)
-            {
-                out.push_back(next());
-                continue;
-            }
-
-            const uint8_t first = next();
-            const uint8_t second = next();
-            const std::size_t distance = std::size_t{first & 0xF0U} << 4 | second;
-            if (distance == 0)
-            {
-                if (out.size() != size)
-                {
-                    throw xsflib::FormatError("a packed file doesn't hold the size that it gives");
-                }
-
-                return out;
-            }
-
-            if (distance > out.size())
-            {
-                throw xsflib::FormatError("a packed file copies from before its start");
-            }
-
-            const std::size_t nibble = first & 0x0FU;
-            const std::size_t length = nibble != 0 ? nibble + 1 : next() + kLongLength;
-            for (std::size_t i = 0; i < length; i++)
-            {
-                const uint8_t copied = out[out.size() - distance];
-                out.push_back(copied);
-            }
-        }
-    }
-}
-
-std::unique_ptr<LibmusGame> LibmusGame::Open(std::span<const uint8_t> image, const LibmusProfile& profile)
-{
-    std::unique_ptr<LibmusGame> game(new LibmusGame);
-    game->image_ = image;
-    game->profile_ = &profile;
-
-    // A word or a halfword of a table that the profile places in the image.
-    const auto table_word = [&image](std::size_t at, std::size_t size)
-    {
-        if (at > image.size() || image.size() - at < size)
-        {
-            throw xsflib::FormatError("a table of the game's profile isn't in the image");
-        }
-
-        return size == 2 ? xsflib::LoadBe16(image.data() + at) : xsflib::LoadBe32(image.data() + at);
-    };
-
-    // The game's bank and its songs, compressed, in a directory: the places of the wave table and the samples, the
-    // count of songs and the place of each.
-    std::optional<Bank> directory_bank;
-    if (profile.directory != 0)
-    {
-        constexpr std::size_t kSongPlaces = 12;
-
-        const auto word = [&](std::size_t at)
-        {
-            return table_word(profile.directory + at, 4);
-        };
-
-        const auto from = [&](std::size_t at)
-        {
-            const std::size_t place = profile.directory + word(at);
-            if (place > image.size())
-            {
-                throw xsflib::FormatError("a part of the game's directory isn't in the image");
-            }
-
-            return image.subspan(place);
-        };
-
-        directory_bank.emplace();
-        directory_bank->unpacked_pointers = ntdlib::DecodeYay0(from(0));
-        directory_bank->pointers = directory_bank->unpacked_pointers;
-        directory_bank->samples = from(4);
-
-        const uint32_t count = word(8);
-        game->unpacked_songs_.reserve(count);
-        for (uint32_t i = 0; i < count; i++)
-        {
-            game->unpacked_songs_.push_back(ntdlib::DecodeYay0(from(kSongPlaces + std::size_t{4} * i)));
-            game->songs_.push_back(game->unpacked_songs_.back());
-        }
-    }
-
-    const LibmusFileTable& files = profile.cartridge_files;
-    if (files.table != 0)
-    {
-        constexpr std::size_t kFileEntry = 8;
-
-        // The numbers below the first song name no song.
-        game->songs_.resize(files.first_song);
-        for (std::size_t i = 0; i < profile.song_count; i++)
-        {
-            const std::size_t at =
-                files.table + kFileEntry * table_word(files.song_files + std::size_t{2} * (files.first_song + i), 2);
-            if (at + kFileEntry > image.size())
-            {
-                throw xsflib::FormatError("a song's file isn't in the game's table of files");
-            }
-
-            const std::size_t start = files.base + xsflib::LoadBe32(image.data() + at);
-            const std::size_t size = xsflib::LoadBe32(image.data() + at + 4);
-            if (size == 0 || start + size > image.size())
-            {
-                throw xsflib::FormatError("a song isn't in the image");
-            }
-
-            game->songs_.push_back(image.subspan(start, size));
-        }
-    }
-
-    // Each entry of the table holds the start and the end of a song, or only its start if the ends are in a separate
-    // table.
-    const std::size_t stride = profile.song_ends != 0 ? 4 : 8;
-    for (std::size_t i = 0; files.table == 0 && i < profile.song_count; i++)
-    {
-        const std::size_t at = profile.songs + i * stride;
-        const std::size_t end_at = profile.song_ends != 0 ? profile.song_ends + i * 4 : at + 4;
-        const uint32_t start = table_word(at, 4);
-        const uint32_t end = table_word(end_at, 4);
-        if (end <= start || end > image.size())
-        {
-            throw xsflib::FormatError("a song isn't in the image");
-        }
-
-        game->songs_.push_back(image.subspan(start, end - start));
-    }
-
-    // The profile places each song, and gives its name.
-    for (const LibmusSong& song : profile.song_list)
-    {
-        if (song.end <= song.start || song.end > image.size())
-        {
-            throw xsflib::FormatError("a song isn't in the image");
-        }
-
-        const std::span<const uint8_t> file = image.subspan(song.start, song.end - song.start);
-        if (song.deflated)
-        {
-            std::vector<uint8_t> unpacked;
-            std::size_t used = 0;
-            std::string error;
-            if (!ntdlib::DecodeDeflate(file, unpacked, used, error))
-            {
-                throw xsflib::FormatError("a song's DEFLATE stream is corrupt: " + error);
-            }
-
-            game->unpacked_songs_.push_back(std::move(unpacked));
-            game->songs_.push_back(game->unpacked_songs_.back());
-        }
-        else
-        {
-            game->songs_.push_back(file);
-        }
-
-        game->names_.emplace_back(song.name != nullptr ? song.name : "");
-    }
-
-    // The game's table of songs names a packed file and a name for each.
-    if (profile.files.directory != 0)
-    {
-        constexpr std::size_t kDirectoryEntry = 8;
-        constexpr std::size_t kTableEntry = 8;
-
-        const auto unpack = [&](std::size_t number)
-        {
-            const std::size_t at = profile.files.directory + number * kDirectoryEntry;
-            const uint32_t start = table_word(at, 4);
-            const uint32_t end = table_word(at + 4, 4);
-            if (end <= start || end > image.size())
-            {
-                throw xsflib::FormatError("a file isn't in the image");
-            }
-
-            return UnpackDirectoryFile(image.subspan(start, end - start));
-        };
-
-        const std::vector<uint8_t> table_file = unpack(profile.files.table_file);
-        for (std::size_t i = 0; i < profile.files.table_count; i++)
-        {
-            const std::size_t at = profile.files.table + i * kTableEntry;
-            if (at + kTableEntry > table_file.size())
-            {
-                throw xsflib::FormatError("the game's table of songs isn't in its file");
-            }
-
-            game->unpacked_songs_.push_back(unpack(xsflib::LoadBe32(table_file.data() + at)));
-            game->songs_.push_back(game->unpacked_songs_.back());
-
-            const std::size_t name = xsflib::LoadBe32(table_file.data() + at + 4) - profile.files.file_address;
-            if (name >= table_file.size())
-            {
-                throw xsflib::FormatError("a song's name isn't in the table's file");
-            }
-
-            const std::span<const uint8_t> rest = std::span(table_file).subspan(name);
-            game->names_.emplace_back(rest.begin(), std::ranges::find(rest, uint8_t{0}));
-        }
-    }
-
-    const auto read_waves = [&](Bank& bank)
-    {
-        // The table's header: a name, flags, the name of the sample file, the count, and three lists.
-        constexpr std::size_t kCount = 0x20;
-        constexpr std::size_t kBaseNotes = 0x24;
-        constexpr std::size_t kDetunes = 0x28;
-        constexpr std::size_t kWaveList = 0x2C;
-        constexpr int kBaseOffset = 48;
-
-        const std::span<const uint8_t> pointers = bank.pointers;
-        const auto word = [&](std::size_t at)
-        {
-            return xsflib::LoadBe32(pointers.data() + at);
-        };
-
-        const uint32_t count = word(kCount);
-        for (uint32_t i = 0; i < count; i++)
-        {
-            const uint32_t wave = word(word(kWaveList) + std::size_t{4} * i);
-            BankWave entry;
-            entry.base = word(wave);
-            entry.length = word(wave + std::size_t{4});
-            entry.vadpcm = pointers[wave + std::size_t{8}] == 0;
-            entry.loop = word(wave + std::size_t{12});
-            entry.book = word(wave + std::size_t{16});
-            bank.waves.push_back(entry);
-
-            const int cents = static_cast<int8_t>(pointers[word(kDetunes) + std::size_t{4} * i]);
-            const int base = static_cast<int8_t>(static_cast<uint8_t>(pointers[word(kBaseNotes) + i] - kBaseOffset));
-            bank.detunes.push_back(cents / 100.0 + base);
-        }
-    };
-
-    if (directory_bank)
-    {
-        read_waves(*directory_bank);
-        game->banks_.push_back(std::move(*directory_bank));
-    }
-
-    for (const LibmusBankPlace& place : profile.banks)
-    {
-        Bank bank;
-        bank.first_song = place.first_song;
-        // The table of waves ends where the samples start, if they follow it.
-        bank.pointers = place.samples > place.pointers ? image.subspan(place.pointers, place.samples - place.pointers)
-                                                       : image.subspan(place.pointers);
-        bank.samples = image.subspan(place.samples);
-        read_waves(bank);
-        game->banks_.push_back(std::move(bank));
-    }
-
-    game->repeats_.assign(game->songs_.size(), false);
-    for (std::size_t later = 1; later < game->songs_.size(); later++)
-    {
-        for (std::size_t earlier = 0; earlier < later && !game->repeats_[later]; earlier++)
-        {
-            game->repeats_[later] = game->Repeats(later, earlier);
-        }
-    }
-
-    return game;
-}
-
-std::vector<ntdlib::sequence_export::Sequence> LibmusGame::Sequences() const
-{
-    std::vector<ntdlib::sequence_export::Sequence> sequences;
-    for (std::size_t i = 0; i < songs_.size(); i++)
-    {
-        if (!repeats_[i] && !songs_[i].empty())
-        {
-            sequences.push_back({i, NameOf(i)});
-        }
-    }
-
-    std::size_t beside = songs_.size();
-    for (const LibmusTempoChange& change : profile_->tempo_changes)
-    {
-        if (change.beside != nullptr)
-        {
-            sequences.push_back({beside++, NameOf(change.song, change.beside)});
-        }
-    }
-
-    return sequences;
-}
-
-std::string LibmusGame::NameOf(std::size_t index, const char* beside) const
-{
-    std::string name = SequenceLabel(index);
-    if (index < names_.size())
-    {
-        name += " (" + names_[index] + (beside != nullptr ? std::string(", ") + beside : "") + ")";
-    }
-    else if (beside != nullptr)
-    {
-        name += std::string(" (") + beside + ")";
-    }
-
-    return name;
-}
-
-// A song repeats an earlier one if the two hold the same data, take the same bank and have the same entry in the game's
-// table of volumes.
-bool LibmusGame::Repeats(std::size_t later, std::size_t earlier)
-{
-    if (!std::ranges::equal(songs_[later], songs_[earlier]) || &BankOfSong(later) != &BankOfSong(earlier))
-    {
-        return false;
-    }
-
-    if (!profile_->song_list.empty())
-    {
-        const LibmusSong& a = profile_->song_list[later];
-        const LibmusSong& b = profile_->song_list[earlier];
-        return a.volume == b.volume && a.reverb_base == b.reverb_base;
-    }
-
-    if (!profile_->song_volume_list.empty())
-    {
-        return profile_->song_volume_list[later] == profile_->song_volume_list[earlier];
-    }
-
-    if (profile_->song_volumes == 0)
-    {
-        return true;
-    }
-
-    const auto entry = [&](std::size_t song)
-    {
-        return image_.subspan(profile_->song_volumes + song * profile_->song_volume_stride,
-                              profile_->song_volume_stride);
-    };
-
-    return std::ranges::equal(entry(later), entry(earlier));
-}
-
-LibmusGame::Bank& LibmusGame::BankOfSong(std::size_t index)
-{
-    Bank* found = &banks_.at(0);
-    for (Bank& bank : banks_)
-    {
-        if (bank.first_song <= index)
-        {
-            found = &bank;
-        }
-    }
-
-    return *found;
-}
-
-std::shared_ptr<const Wave> LibmusGame::WaveAt(Bank& bank, int32_t index) const
-{
-    const auto found = bank.decoded.find(index);
-    if (found != bank.decoded.end())
-    {
-        return found->second;
-    }
-
-    const BankWave& wave = bank.waves.at(static_cast<std::size_t>(index));
-    const std::span<const uint8_t> pointers = bank.pointers;
-    const auto word = [&](std::size_t at)
-    {
-        return xsflib::LoadBe32(pointers.data() + at);
-    };
-
-    n64::VadpcmBook book;
-    if (wave.vadpcm)
-    {
-        book.order = static_cast<int32_t>(word(wave.book));
-        book.predictor_count = static_cast<int32_t>(word(wave.book + std::size_t{4}));
-        const std::size_t values =
-            std::size_t{8} * static_cast<std::size_t>(book.order) * static_cast<std::size_t>(book.predictor_count);
-        for (std::size_t i = 0; i < values; i++)
-        {
-            book.coefficients.push_back(
-                static_cast<int16_t>(xsflib::LoadBe16(pointers.data() + wave.book + std::size_t{8} + i * 2)));
-        }
-    }
-
-    n64::BankLoop loop;
-    if (wave.loop != 0)
-    {
-        loop.start = word(wave.loop);
-        loop.end = word(wave.loop + std::size_t{4});
-        loop.count = word(wave.loop + std::size_t{8});
-        loop.has_state = wave.vadpcm;
-        for (std::size_t i = 0; i < loop.state.size(); i++)
-        {
-            loop.state[i] =
-                static_cast<int16_t>(xsflib::LoadBe16(pointers.data() + wave.loop + std::size_t{12} + i * 2));
-        }
-    }
-
-    char name[32];
-    std::snprintf(name, sizeof(name), "w%08X", wave.base);
-    std::shared_ptr<const Wave> out =
-        DecodeWave(bank.samples.subspan(wave.base, wave.length), wave.vadpcm ? &book : nullptr,
-                   wave.loop != 0 ? &loop : nullptr, name, profile_->output_rate);
-    bank.decoded[index] = out;
-
-    return out;
-}
-
-Conversion LibmusGame::Convert(std::size_t index, const PerformOptions& options)
-{
-    // A version that the game's code plays beside the song comes after the songs. Any other change replaces the song.
-    const LibmusTempoChange* change = nullptr;
-    std::size_t beside = songs_.size();
-    for (const LibmusTempoChange& candidate : profile_->tempo_changes)
-    {
-        if (candidate.beside != nullptr ? beside++ == index : candidate.song == index)
-        {
-            change = &candidate;
-        }
-    }
-
-    const std::string name =
-        NameOf(change != nullptr ? change->song : index, change != nullptr ? change->beside : nullptr);
-
-    if (change != nullptr)
-    {
-        index = change->song;
-    }
-
-    LibmusSettings settings;
-    if (change != nullptr)
-    {
-        settings.tempo_scale = change->scale;
-    }
-
-    if (!profile_->song_list.empty())
-    {
-        settings.song_volume = profile_->song_list[index].volume;
-        settings.reverb_base = profile_->song_list[index].reverb_base;
-    }
-    else if (profile_->song_volume != 0)
-    {
-        settings.song_volume = profile_->song_volume;
-    }
-    else
-    {
-        settings.song_volume = profile_->song_volume_list.empty()
-                                   ? image_[profile_->song_volumes + index * profile_->song_volume_stride + 1]
-                                   : profile_->song_volume_list[index];
-    }
-
-    settings.master_volume = profile_->master_volume;
-    settings.output_rate = profile_->output_rate;
-    settings.early_form = profile_->early_form;
-    settings.early_player = profile_->early_player;
-    settings.clipped_envelopes = profile_->clipped_envelopes;
-    settings.loop_on_later_passes = profile_->loop_on_later_passes;
-
-    Bank& bank = BankOfSong(index);
-    LibmusPerformance played = PerformLibmus(songs_.at(index), bank.detunes, settings, options);
-    for (const LibmusPresetKey& key : played.presets)
-    {
-        // A clipped preset's name gives the envelope's value at the stop, ahead of the bytes that a SoundFont's 19
-        // characters may cut.
-        char top[16] = "";
-        if (key.top != 0)
-        {
-            std::snprintf(top, sizeof(top), " top%d", key.top / kTopSteps);
-        }
-
-        char preset_name[48];
-        std::snprintf(preset_name, sizeof(preset_name), "w%d%s e%d-%d-%d-%d-%d", key.wave, top, key.envelope[1],
-                      key.envelope[3], key.envelope[5], key.envelope[4], key.envelope[6]);
-
-        Zone zone =
-            LibmusZone(key, bank.detunes.at(static_cast<std::size_t>(key.wave)), settings, played.ticks_per_second);
-        zone.wave = WaveAt(bank, key.wave);
-
-        Instrument preset;
-        preset.name = preset_name;
-        preset.zones.push_back(std::move(zone));
-        played.performance.presets.push_back(std::move(preset));
-    }
-
-    return BuildFiles(std::move(played.performance), name, options.program);
 }
 
 } // namespace ultralib::sequence_export::n64

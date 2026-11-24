@@ -13,8 +13,10 @@
 #include <span>
 #include <vector>
 
+#include "ntdlib/rounding.h"
 #include "xsflib/bytes.h"
 
+#include "ead_constants.h"
 #include "ead_later_constants.h"
 #include "ead_later_tables.h"
 #include "ead_lists.h"
@@ -27,13 +29,16 @@ namespace ultralib::n64
 namespace
 {
 
-using ead_later_constants::kMuteSoften;
-using ead_later_constants::kMuteStopNotes;
+using ead_constants::kChannelVibratoRate;
+using ead_constants::kMuteSoften;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kPriorityDefault;
+using ead_constants::kPriorityDisabled;
+using ead_constants::kPriorityStopping;
+using ead_constants::kTicksPerBeat;
 using ead_later_constants::kOneChannel;
 using ead_later_constants::kSurroundStateSize;
-using ead_later_constants::kTicksPerBeat;
 using ead_later_constants::kTwoChannels;
-using ead_lists::Align16;
 using ead_lists::WriteBe16;
 
 namespace tables = ead_later_tables;
@@ -206,6 +211,7 @@ EadLaterPlayer::EadLaterPlayer(const EadLaterConfig& config, const EadLaterFiles
         target.mute_behavior = kMuteSoften | kMuteStopNotes;
         target.fade_scale = 1.0F;
         target.bend = 1.0F;
+
         for (int slot = 0; slot < kChannelsPerPlayer; slot++)
         {
             channels_[static_cast<std::size_t>(player * kChannelsPerPlayer + slot)].player = player;
@@ -220,7 +226,7 @@ void EadLaterPlayer::SetRates(int frequency)
 {
     const auto dac_rate = static_cast<int>(static_cast<float>(kConsoleClock) / static_cast<float>(frequency) + 0.5F);
     ai_frequency_ = kConsoleClock / dac_rate;
-    frame_target_ = Align16(frequency / kRefreshRate);
+    frame_target_ = ntdlib::AlignUp(frequency / kRefreshRate, 16);
     updates_per_frame_ = (frame_target_ + 0x10) / 0xD0 + 1;
     samples_per_update_ = (frame_target_ / updates_per_frame_) & ~7;
     samples_per_update_max_ = samples_per_update_ + 8;
@@ -348,9 +354,11 @@ void EadLaterPlayer::InitReverb(Reverb& reverb, const EadLaterReverb& settings, 
     reverb.left = memory.Allocate(std::size_t{reverb.window} * 2);
     reverb.right = memory.Allocate(std::size_t{reverb.window} * 2);
     reverb.buffer_samples = reverb.window;
+
     if (reverb.downsample != 1)
     {
         reverb.downsample_pitch = static_cast<uint16_t>(0x8000 / reverb.downsample);
+
         for (uint32_t& state : reverb.resample_states)
         {
             state = memory.Allocate(32);
@@ -407,6 +415,7 @@ void EadLaterPlayer::ResetPlayer(int index)
     player.fade_step = 0.0F;
     player.volume = 0.0F;
     player.mute_scale = 0.5F;
+
     for (int slot = 0; slot < kChannelsPerPlayer; slot++)
     {
         InitChannel(index * kChannelsPerPlayer + slot);
@@ -425,9 +434,9 @@ void EadLaterPlayer::ReleaseNotesOfFont(int font)
 {
     for (Voice& voice : voices_)
     {
-        if (voice.font == font && voice.priority != 0 && voice.adsr.phase == AdsrPhase::kDecay)
+        if (voice.font == font && voice.priority != kPriorityDisabled && voice.adsr.phase == AdsrPhase::kDecay)
         {
-            voice.priority = 1;
+            voice.priority = kPriorityStopping;
             voice.adsr.fade_step = updates_inverse_;
             voice.adsr.release = true;
         }
@@ -440,6 +449,7 @@ void EadLaterPlayer::DisablePlayer(int index)
     const bool was_finished = player.finished;
     DisableChannelLayers(index);
     ClearPool(PlayerPool(index));
+
     if (!player.enabled)
     {
         return;
@@ -447,6 +457,7 @@ void EadLaterPlayer::DisablePlayer(int index)
 
     player.enabled = false;
     player.finished = true;
+
     if (was_finished && !majora_)
     {
         ReleaseNotesOfFont(player.default_font);
@@ -477,14 +488,14 @@ void EadLaterPlayer::InitChannel(int index)
     channel.reverb_index = 0;
     channel.reverb = 0;
     channel.gain = 0;
-    channel.priority = 3;
-    channel.release_priority = 1;
+    channel.priority = kPriorityDefault;
+    channel.release_priority = kPriorityStopping;
     channel.delay = 0;
     channel.adsr.envelope = {};
     channel.adsr.release = 0xF0;
     channel.adsr.sustain = 0;
-    channel.vibrato_rate_target = 0x800;
-    channel.vibrato_rate_start = 0x800;
+    channel.vibrato_rate_target = kChannelVibratoRate;
+    channel.vibrato_rate_start = kChannelVibratoRate;
     channel.vibrato_depth_target = 0;
     channel.vibrato_depth_start = 0;
     channel.vibrato_rate_delay = 0;
@@ -504,6 +515,7 @@ void EadLaterPlayer::InitChannel(int index)
 void EadLaterPlayer::DisableChannel(int index)
 {
     Channel& channel = channels_[static_cast<std::size_t>(index)];
+
     for (int slot = 0; slot < kLayersPerChannel; slot++)
     {
         FreeLayer(index, slot);
@@ -523,6 +535,7 @@ void EadLaterPlayer::EnableChannel(int player, int slot, uint32_t script)
     channel.script.depth = 0;
     channel.script.pc = script;
     channel.delay = 0;
+
     for (int i = 0; i < kLayersPerChannel; i++)
     {
         if (channel.layers[static_cast<std::size_t>(i)] != kNoLayer)
@@ -759,7 +772,7 @@ void EadLaterPlayer::StartSampleLoad(int player, int channel, int port, int font
 
     samples_in_memory_.push_back(sample);
     SlowLoad load;
-    load.bytes_left = Align16(static_cast<int>(sample->size));
+    load.bytes_left = ntdlib::AlignUp(static_cast<int>(sample->size), 16);
     load.player = player;
     load.channel = channel;
     load.port = port;
@@ -783,6 +796,7 @@ void EadLaterPlayer::RunSlowLoads()
                     ? channels_[static_cast<std::size_t>(load.channel)].ports[static_cast<std::size_t>(load.port)]
                     : players_[static_cast<std::size_t>(load.player)].ports[static_cast<std::size_t>(load.port)];
             status = 1;
+
             if (load.sequence >= 0)
             {
                 Player& player = players_[static_cast<std::size_t>(load.player)];
@@ -810,6 +824,7 @@ void EadLaterPlayer::RunSlowLoads()
 void EadLaterPlayer::Start(int index, int sequence)
 {
     const RoundTowardZero rounding(stadium_2_);
+
     if (static_cast<std::size_t>(sequence) >= files_->sequences.size() || index >= config_.players)
     {
         return;
@@ -822,6 +837,7 @@ void EadLaterPlayer::Start(int index, int sequence)
         for (const uint8_t bank : files_->bank_sets[static_cast<std::size_t>(sequence)])
         {
             font = bank;
+
             if (bank < font_loaded_.size())
             {
                 font_loaded_[bank] = 1;
@@ -865,6 +881,7 @@ void EadLaterPlayer::FadeOut(int index, int updates)
 {
     const RoundTowardZero rounding(stadium_2_);
     Player& player = players_[static_cast<std::size_t>(index)];
+
     if (updates == 0)
     {
         updates = 1;

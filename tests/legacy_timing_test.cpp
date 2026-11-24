@@ -154,7 +154,7 @@ void BreakMovesCountBack()
     const uint64_t ticks = system.TicksPerInstruction();
     system.Schedule(System::Event::kVi, kEventTime);
 
-    // The clock moves back, so the run goes on for one more instruction than it would without the BREAK.
+    // The clock moves back. The run goes on for one more instruction than it would without the BREAK.
     RunProgram(system, {kLuiT0Mi, kLoadMiIntr, kNop, kBreak, kSetT2}, 4);
 
     XSFLIB_CHECK(system.GetCpu().Gpr(10) == 1);
@@ -510,7 +510,7 @@ void TlbOverlaps()
     XSFLIB_CHECK(load() == 0xAAAAAAAA);
 }
 
-// Each page has a read mapping and a write mapping. A half with V set and D clear sets only the read mapping, so stores
+// Each page has a read mapping and a write mapping. A half with V set and D clear sets only the read mapping. Stores
 // still go to the other entry's page. Replacing that half clears only the read mapping.
 void TlbSeparateMappings()
 {

@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "ntdlib/wave/adpcm.h"
 #include "xsflib/binary.h"
 
 namespace ultralib::n64
@@ -90,7 +91,7 @@ Attempt TryFrame(std::span<const int16_t, kVadpcmFrameSamples> samples, const Va
     return attempt;
 }
 
-// The frame of a predictor that gives the samples exactly, if none of them lies at a limit of 16 bits. The residuals'
+// The frame of a predictor that gives the samples exactly, if none of them is at a limit of 16 bits. The residuals'
 // values follow from the samples. `energy` receives the sum of their squares. Of the scales that fit, a frame takes the
 // highest, like the SDK's encoder. A frame of zeros takes scale 0.
 bool ExactFrame(std::span<const int16_t, kVadpcmFrameSamples> samples, const VadpcmBook& book,
@@ -323,7 +324,7 @@ VadpcmFrame VadpcmFrame::Parse(std::span<const uint8_t, kVadpcmFrameSize> bytes)
     {
         const uint8_t byte = bytes[1 + i / 2];
         const int nibble = (i % 2 == 0) ? (byte >> 4) : (byte & 0x0F);
-        frame.residuals[i] = static_cast<int8_t>(nibble >= 8 ? nibble - 16 : nibble);
+        frame.residuals[i] = static_cast<int8_t>(ntdlib::wave::SignedNibble(nibble));
     }
 
     return frame;

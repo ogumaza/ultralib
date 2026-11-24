@@ -398,15 +398,17 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(out + i) = 0.0F;
             }
-
             break;
         }
+
     case AudioOpKind::kMove:
         RunMove(world, op, count);
         break;
+
     case AudioOpKind::kLoad:
         RunLoad(world, op, bus, count);
         break;
+
     case AudioOpKind::kSave:
         {
             const std::size_t place = world.Place(op.in);
@@ -415,9 +417,9 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.WriteMemory(start + i, world.Dmem(place + i));
             }
-
             break;
         }
+
     case AudioOpKind::kMix:
         {
             const std::size_t in = world.Place(op.in);
@@ -427,9 +429,9 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(out + i) += world.Dmem(in + i) * gain;
             }
-
             break;
         }
+
     case AudioOpKind::kAdd:
         {
             const std::size_t in = world.Place(op.in);
@@ -438,9 +440,9 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(out + i) += world.Dmem(in + i);
             }
-
             break;
         }
+
     case AudioOpKind::kGain:
         {
             const std::size_t place = world.Place(op.in);
@@ -449,9 +451,9 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(place + i) *= gain;
             }
-
             break;
         }
+
     case AudioOpKind::kMultiply:
         {
             const std::size_t place = world.Place(op.in);
@@ -460,9 +462,9 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(place + i) *= static_cast<float>(factors[(i / scale) % 32]);
             }
-
             break;
         }
+
     case AudioOpKind::kHalve:
         {
             const std::size_t in = world.Place(op.in);
@@ -471,30 +473,37 @@ void EnhancedMix::RunOp(World& world, const Frame& frame, const AudioOp& op, con
             {
                 world.Dmem(out + i) = world.Dmem(in + (i * 2));
             }
-
             break;
         }
+
     case AudioOpKind::kDuplicate:
         RunDuplicate(world, op, count);
         break;
+
     case AudioOpKind::kInterleave:
         RunInterleave(world, op, count);
         break;
+
     case AudioOpKind::kPole:
         RunPole(world, op, frame.ops.tables.data() + op.extra);
         break;
+
     case AudioOpKind::kFilter:
         RunFilter(world, op, frame.ops.tables.data() + op.extra);
         break;
+
     case AudioOpKind::kResample:
         RunResample(world, frame.ops.resamples[op.extra]);
         break;
+
     case AudioOpKind::kNearest:
         RunNearest(world, op, count);
         break;
+
     case AudioOpKind::kEnvMixer:
         RunEnv(world, frame.ops.envs[op.extra]);
         break;
+
     case AudioOpKind::kVoice:
     case AudioOpKind::kVoicesEnd:
     case AudioOpKind::kChunkEnd:

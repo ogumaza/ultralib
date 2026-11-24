@@ -12,10 +12,9 @@
 #include <utility>
 #include <vector>
 
+#include "seqlib/midi/encoder.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
-
-#include "seqlib/midi/encoder.h"
 
 namespace ultralib::n64
 {
@@ -349,7 +348,7 @@ void AppendCompressedEvent(std::vector<uint8_t>& out, const MidiEvent& event)
 class CompressedWriter
 {
 public:
-    // The search for blocks starts after the bytes that `out` already holds: the header, whose track offsets change.
+    // The search for blocks starts after the header that `out` already holds. The track offsets in the header change.
     explicit CompressedWriter(std::vector<uint8_t>& out) : out_(out), remembered_(out.size())
     {
     }
@@ -392,7 +391,7 @@ private:
         return byte != CompressedMidi::kBlockCode && byte != kMidiMeta;
     }
 
-    // A byte of 0xFE takes two bytes in the file, wherever it lies in a track.
+    // A byte of 0xFE takes two bytes in the file, wherever it is in a track.
     static std::size_t EscapedSize(std::span<const uint8_t> bytes)
     {
         return bytes.size() +
@@ -481,8 +480,7 @@ private:
             {
                 const std::size_t distance = out_.size() - best_place;
                 out_.push_back(CompressedMidi::kBlockCode);
-                out_.push_back(static_cast<uint8_t>(distance >> 8));
-                out_.push_back(static_cast<uint8_t>(distance));
+                xsflib::AppendBe16(out_, static_cast<uint16_t>(distance));
                 out_.push_back(static_cast<uint8_t>(best_length));
                 position += best_length;
             }

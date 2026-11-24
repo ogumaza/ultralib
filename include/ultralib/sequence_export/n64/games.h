@@ -8,12 +8,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
-#include <vector>
 
+#include "ultralib/n64/al_synth.h"
 #include "ultralib/n64/ead_script.h"
-#include "ultralib/n64/song_names.h"
 
 namespace ultralib::sequence_export::n64
 {
@@ -28,26 +28,12 @@ struct SongVolumes
     int other = 0x7FFF;
 };
 
-using ultralib::n64::SongName;
-
 // A sequence's label: "Sequence 0x1A", with at least two digits.
 std::string SequenceLabel(std::size_t index);
 
-// The label of sequence `index`, followed in parentheses by the name that `names` gives the sequence and `beside`,
-// joined by a comma. Without either, the label alone.
-std::string SequenceName(std::size_t index, std::span<const SongName> names, const char* beside = nullptr);
-
-// The effect that a game's synthesizer has on its auxiliary bus: ALSynConfig's fxType.
-enum class BusEffect
-{
-    kNone,
-    kSmallRoom,
-    kBigRoom,
-    kChorus,
-    kFlange,
-    kEcho,
-    kCustom,
-};
+// The label of a version of sequence `index`: the sequence's label, followed in parentheses by `settings`. The settings
+// set the version apart from the others. Without settings, the label is the sequence's label alone.
+std::string SequenceLabel(std::size_t index, const std::string& settings);
 
 // Whose player reads a game's songs on libultra's synthesizer.
 enum class LibultraPlayer
@@ -60,26 +46,27 @@ enum class LibultraPlayer
     kAmbrella,
 
     // The SDK's compressed sequence player as HAL changed it for Pokémon Snap. A voice's volume holds the player's
-    // scale in the place of the sound's volume, times a channel's scale out of 128. CC21 sets the player's scale, which
-    // starts at 120. CC8 sets a channel's, which starts at 127.
+    // scale in the place of the sound's volume, times a channel's scale out of 128. CC21 sets the player's scale. It
+    // starts at 120. CC8 sets a channel's scale. It starts at 127.
     kHal,
 };
 
 // A game on libultra's sequence players.
 // A song that the game's code also plays at another rate. The rate divides the time between the song's events. The
-// tempo changes and the pitch doesn't. This version makes a track of its own, named by `beside`.
+// tempo changes and the pitch doesn't. This version makes a track of its own.
 struct LibultraRateChange
 {
     std::size_t song = 0;
     double rate = 1.0;
-    const char* beside = nullptr;
 };
 
-// Another set of songs, on a separate bank file, for a mode that the game code picks. The name of each song in the
-// set ends with the name of the set.
+// The settings of a rate change's track, for its label: "rate 0.798".
+std::string LibultraRateSettings(const LibultraRateChange& change);
+
+// Another set of songs, on a separate bank file, for a mode that the game code picks. The label of each song in the
+// set ends with the number of the set: "set 2" for the first of these sets. The profile's songs are the first set.
 struct LibultraSongSet
 {
-    const char* name = nullptr;
     std::size_t first_song = 0;
     std::size_t song_count = 0;
     std::size_t bank = 0; // the offset in the image of the set's bank file
@@ -94,7 +81,7 @@ struct LibultraProfile
     std::size_t sequences = 0;
     std::size_t bank = 0;
 
-    // The songs are in a table of Rare's compressed blocks, which the image's bytes lead to.
+    // The songs are in a table of Rare's compressed blocks. The image's bytes lead to the table.
     bool rare_sequences = false;
 
     // The songs are in Hudson's sequence bank of revision S2. Each song's record gives its bank in the bank file and
@@ -131,10 +118,11 @@ struct LibultraProfile
     // bank's ranges.
     int program_bend_range = 0;
 
-    // The effect on the auxiliary bus. Without an effect, the bus mixes into the main bus.
-    BusEffect effect = BusEffect::kNone;
+    // The effect that the game's synthesizer has on its auxiliary bus: ALSynConfig's fxType. Without an effect, the bus
+    // mixes into the main bus. No value means that the effect isn't known. The sequences' sends then go out as they
+    // would to an effect.
+    std::optional<ultralib::n64::AlEffect> effect = ultralib::n64::AlEffect::kNone;
 
-    std::span<const SongName> names;
     std::span<const LibultraRateChange> rate_changes;
 };
 
@@ -158,7 +146,6 @@ struct EadGameCall
 struct EadTrack
 {
     std::size_t sequence = 0;
-    const char* name = nullptr;
     int variation = 0;            // the value that the game's call gives the sequence's variation commands
     uint16_t silent_channels = 0; // the channels that the game's code fades to nothing
     int tempo_change = 0;         // the later engine's change of tempo that the game's code sets, in beats a minute
@@ -250,9 +237,15 @@ struct EadProfile
     // The sequences that the game's code plays in more than one way. Each way is a track. Another sequence is one
     // track.
     std::span<const EadTrack> tracks;
-
-    std::span<const SongName> names;
 };
+
+// The settings that `track` sets, for its label: "variation -128, without channels 6, 9, 10 and 11", "port 2 = 1",
+// "tempo +17" or "volume 80" for a call's volume. Empty for a track that sets none.
+std::string EadTrackSettings(const EadTrack& track);
+
+// The label of `track`: its sequence's label, with the track's settings where `profile` has other tracks of the same
+// sequence.
+std::string EadTrackLabel(const EadProfile& profile, const EadTrack& track);
 
 // A bank of a game on the N64 Music Tools: the offsets in the image of its table of waves and of its samples.
 struct LibmusBankPlace
@@ -291,8 +284,11 @@ struct LibmusTempoChange
     int scale = 128; // out of 128
 
     // The game's code also plays the song without the change. This version then makes a track of its own.
-    const char* beside = nullptr;
+    bool beside = false;
 };
+
+// The settings of a tempo change, for the label of its track: "tempo 142/128".
+std::string LibmusTempoSettings(const LibmusTempoChange& change);
 
 // A song of a game on the N64 Music Tools, at a place in the image that the profile gives. The game's code gives the
 // song's channels a volume and a reverb base.
@@ -303,7 +299,6 @@ struct LibmusSong
     bool deflated = false; // the file is a raw DEFLATE stream
     int volume = 0x80;
     int reverb_base = 0;
-    const char* name = nullptr;
 };
 
 // A game on Software Creations' N64 Music Tools.
@@ -380,28 +375,32 @@ struct SbnChange
     bool near = false;      // the game's code gives the mix its near level, not its full level
     bool linked = false;    // the linked tracks play in place of the tracks that they link to
     std::size_t levels = 0; // a list of tracks and levels in the image, or 0 for none
-    const char* name = nullptr;
 };
+
+// The settings of a change, for the label of its track: "mix 4, near", "linked" or "track levels at 0x541B8".
+std::string SbnChangeSettings(const SbnChange& change);
 
 struct SbnProfile
 {
     uint32_t output_rate = 32006;
 
-    // The game's table of ticks a beat, by a song's timing preset, as an offset in the image.
+    // The game's table of ticks a beat, a byte for each of a song's 8 timing presets, as an offset in the image.
     std::size_t ticks_per_beat = 0;
 
     // The game's table of an envelope's times, in microseconds.
     std::size_t envelope_times = 0;
     std::size_t envelope_time_count = 0;
 
-    // The game's table that turns the first byte of a custom envelope's step into an index of the times.
+    // The game's table of 40 bytes that turns the first byte of a custom envelope's step into an index of the times.
     std::size_t custom_times = 0;
-    std::size_t custom_time_count = 0;
 
     // The lists of the game's default envelope: press, then release, of four bytes each.
     std::size_t default_envelope = 0;
 
-    std::span<const SongName> names;
+    // The game's table of the factors of a tuning, as floats: 128 and 32 above unity, then 128 and 128 below. The
+    // conversion computes a tuning's ratio, and only the model of the engine reads this table.
+    std::size_t tune_scaling = 0;
+
     std::span<const SbnChange> changes;
 };
 

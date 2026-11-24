@@ -59,6 +59,46 @@ void RunClient(AlSynth& synth, Model& player, int32_t& client_samples, int sampl
     synth.SetParamSamples(client_samples & ~0xF);
 }
 
+// What SynthFrames does for each of its players: build a frame's commands, tell whether the player still plays, and
+// take another player's state while keeping the hooks.
+void BuildPlayerFrame(AlSynth& synth, AlPlayer& player, AudioList& list, AudioMemory& memory, uint32_t output,
+                      int samples)
+{
+    BuildAlFrame(synth, player, list, memory, output, samples);
+}
+
+void BuildPlayerFrame(AlSynth& synth, AmbrellaPlayer& player, AudioList& list, AudioMemory& memory, uint32_t output,
+                      int samples)
+{
+    BuildAmbrellaFrame(synth, player, list, memory, output, samples);
+}
+
+bool PlayerBusy(const AlPlayer& player)
+{
+    return player.State() == AlPlayerState::kPlaying;
+}
+
+bool PlayerBusy(const AmbrellaPlayer& player)
+{
+    return player.AnyPlaying();
+}
+
+void TakePlayerState(AlPlayer& player, const AlPlayer& held)
+{
+    auto hook = std::move(player.on_note);
+    player = held;
+    player.on_note = std::move(hook);
+}
+
+void TakePlayerState(AmbrellaPlayer& player, const AmbrellaPlayer& held)
+{
+    auto note_hook = std::move(player.on_note);
+    auto random_hook = std::move(player.random);
+    player = held;
+    player.on_note = std::move(note_hook);
+    player.random = std::move(random_hook);
+}
+
 } // namespace
 
 FrameFormat AlFrameFormat(const AlSynthConfig& config)
@@ -144,95 +184,58 @@ FrameFormat SbnFrameFormat(const SbnPlayerConfig& config)
     return format;
 }
 
-AlFrames::AlFrames(const AlSynthConfig& synth, const AlPlayerConfig& player, AudioMemory& memory)
+template <typename Model, typename Config>
+SynthFrames<Model, Config>::SynthFrames(const AlSynthConfig& synth, const Config& player, AudioMemory& memory)
     : synth_(synth, memory), player_(player, synth_), format_(AlFrameFormat(synth))
 {
 }
 
-AlPlayer& AlFrames::Player()
+template <typename Model, typename Config>
+Model& SynthFrames<Model, Config>::Player()
 {
     return player_;
 }
 
-AlSynth& AlFrames::Synth()
+template <typename Model, typename Config>
+AlSynth& SynthFrames<Model, Config>::Synth()
 {
     return synth_;
 }
 
-std::unique_ptr<FrameModel> AlFrames::Clone() const
+template <typename Model, typename Config>
+std::unique_ptr<FrameModel> SynthFrames<Model, Config>::Clone() const
 {
-    return std::make_unique<AlFrames>(*this);
+    return std::make_unique<SynthFrames>(*this);
 }
 
-void AlFrames::TakeState(const FrameModel& other)
+template <typename Model, typename Config>
+void SynthFrames<Model, Config>::TakeState(const FrameModel& other)
 {
-    const auto& held = dynamic_cast<const AlFrames&>(other);
-    auto hook = std::move(player_.on_note);
+    const auto& held = dynamic_cast<const SynthFrames&>(other);
     synth_ = held.synth_;
-    player_ = held.player_;
-    player_.on_note = std::move(hook);
+    TakePlayerState(player_, held.player_);
 }
 
-void AlFrames::BuildFrame(AudioList& list, AudioMemory& memory, uint32_t output, int samples)
+template <typename Model, typename Config>
+void SynthFrames<Model, Config>::BuildFrame(AudioList& list, AudioMemory& memory, uint32_t output, int samples)
 {
-    BuildAlFrame(synth_, player_, list, memory, output, samples);
+    BuildPlayerFrame(synth_, player_, list, memory, output, samples);
 }
 
-bool AlFrames::Busy() const
+template <typename Model, typename Config>
+bool SynthFrames<Model, Config>::Busy() const
 {
-    return player_.State() == AlPlayerState::kPlaying || synth_.AnyVoicePlaying();
+    return PlayerBusy(player_) || synth_.AnyVoicePlaying();
 }
 
-const FrameFormat& AlFrames::Format() const
+template <typename Model, typename Config>
+const FrameFormat& SynthFrames<Model, Config>::Format() const
 {
     return format_;
 }
 
-AmbrellaFrames::AmbrellaFrames(const AlSynthConfig& synth, const AmbrellaPlayerConfig& player, AudioMemory& memory)
-    : synth_(synth, memory), player_(player, synth_), format_(AlFrameFormat(synth))
-{
-}
-
-AmbrellaPlayer& AmbrellaFrames::Player()
-{
-    return player_;
-}
-
-AlSynth& AmbrellaFrames::Synth()
-{
-    return synth_;
-}
-
-std::unique_ptr<FrameModel> AmbrellaFrames::Clone() const
-{
-    return std::make_unique<AmbrellaFrames>(*this);
-}
-
-void AmbrellaFrames::TakeState(const FrameModel& other)
-{
-    const auto& held = dynamic_cast<const AmbrellaFrames&>(other);
-    auto note_hook = std::move(player_.on_note);
-    auto random_hook = std::move(player_.random);
-    synth_ = held.synth_;
-    player_ = held.player_;
-    player_.on_note = std::move(note_hook);
-    player_.random = std::move(random_hook);
-}
-
-void AmbrellaFrames::BuildFrame(AudioList& list, AudioMemory& memory, uint32_t output, int samples)
-{
-    BuildAmbrellaFrame(synth_, player_, list, memory, output, samples);
-}
-
-bool AmbrellaFrames::Busy() const
-{
-    return player_.AnyPlaying() || synth_.AnyVoicePlaying();
-}
-
-const FrameFormat& AmbrellaFrames::Format() const
-{
-    return format_;
-}
+template class SynthFrames<AlPlayer, AlPlayerConfig>;
+template class SynthFrames<AmbrellaPlayer, AmbrellaPlayerConfig>;
 
 template <typename Model, typename Config>
 MusFrames<Model, Config>::MusFrames(const AlSynthConfig& synth, const Config& player, AudioMemory& memory)

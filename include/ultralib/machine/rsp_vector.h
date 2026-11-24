@@ -2,7 +2,7 @@
 
 // The RSP's vector unit: 32 vector registers of eight 16-bit lanes, the 48-bit accumulator of each lane, the flags
 // registers VCO, VCC and VCE, and the divider with its reciprocal tables. This file is adapted from Iconoclast's RSP
-// (mupen64plus-rsp-cxd4, its vu folder), which is dedicated to the public domain under CC0 1.0. These changes are
+// (mupen64plus-rsp-cxd4, its vu folder). That code is dedicated to the public domain under CC0 1.0. These changes are
 // dedicated the same way.
 
 #pragma once
@@ -73,8 +73,8 @@ private:
     uint16_t SaturateMid(int lane) const;
     uint16_t SaturateLow(int lane) const;
 
-    // The operations that take vt with the element's broadcast. Each has its opcode as a template argument, so that the
-    // choice of operation stays out of the loop over the lanes.
+    // The operations that take vt with the element's broadcast. Each has its opcode as a template argument. The choice
+    // of operation then stays out of the loop over the lanes.
     template <uint32_t kOp>
     void Multiply(int vd, int vs, const Vector& vt);
     template <uint32_t kOp>
@@ -105,7 +105,7 @@ private:
     uint8_t vce_ = 0;
     int32_t div_in_ = 0;
     int32_t div_out_ = 0;
-    bool div_double_ = false; // The last divide was VRCPH or VRSQH, so the next VRCPL or VRSQL takes 32 bits.
+    bool div_double_ = false; // The last divide was VRCPH or VRSQH: the next VRCPL or VRSQL takes 32 bits.
 };
 
 } // namespace ultralib::machine

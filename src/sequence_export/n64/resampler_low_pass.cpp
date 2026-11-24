@@ -26,7 +26,7 @@ constexpr int kDesignPoints = 256;
 // The mean power response of the resampler's 64 filters is r[0] + 2 (r[1] cos w + r[2] cos 2w + r[3] cos 3w), where
 // r[k] is the filters' mean autocorrelation at lag k. The symmetric filter's response is the root of that. Its taps
 // are the cosine coefficients of the root, by the midpoint rule. They're rounded to 1.15, and the centre tap takes
-// what makes the sum 1.0, so that the filter passes a constant level unchanged.
+// what makes the sum 1.0. The filter then passes a constant level unchanged.
 std::array<int16_t, kResamplerLowPassTaps> DesignTaps()
 {
     const std::array<int16_t, kPhases * kPhaseTaps>& table = ultralib::n64::AudioResampleTable();
@@ -86,7 +86,7 @@ public:
     {
     }
 
-    // The sample at `place`, as the filter reads it for the sample at `at`.
+    // The sample at `place` that the filter reads for the sample at `at`.
     int32_t At(int64_t at, int64_t place) const
     {
         if (loops_ && at >= loop_start_ && at < loop_end_)

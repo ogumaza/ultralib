@@ -12,6 +12,10 @@
 #include <span>
 #include <vector>
 
+#include "ntdlib/rounding.h"
+
+#include "ead_common.h"
+#include "ead_constants.h"
 #include "ead_later_tables.h"
 #include "ead_lists.h"
 #include "ead_middle_constants.h"
@@ -22,16 +26,17 @@ namespace ultralib::n64
 namespace
 {
 
-using ead_lists::Align16;
+using ead_constants::kChannelVibratoRate;
+using ead_constants::kMuteSoften;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kMuteStopScript;
+using ead_constants::kPriorityDefault;
+using ead_constants::kTicksPerBeat;
 using ead_lists::WriteBe16;
-using ead_middle_constants::kMuteSoften;
-using ead_middle_constants::kMuteStopNotes;
-using ead_middle_constants::kMuteStopScript;
 using ead_middle_constants::kOneChannel;
-using ead_middle_constants::kPriorityDefault;
-using ead_middle_constants::kStdOneChannel;
-using ead_middle_constants::kTicksPerBeat;
 using ead_middle_constants::kTwoChannels;
+
+namespace standard = ead_standard_dmem;
 
 namespace later_tables = ead_later_tables;
 
@@ -42,7 +47,7 @@ constexpr int kPoolCount = 1 + EadMiddlePlayer::kPlayers + EadMiddlePlayer::kCha
 EadMiddlePlayer::EadMiddlePlayer(const EadMiddleConfig& config, const EadEarlyFiles& files, AudioMemory& memory)
     : config_(config), files_(&files)
 {
-    const int frame_target = Align16(config.frequency / config.refresh_rate);
+    const int frame_target = ntdlib::AlignUp(config.frequency / config.refresh_rate, 16);
     const int updates = (frame_target + 16) / (config.standard_microcode ? 160 : 192) + 1;
     samples_per_update_ = (frame_target / updates) & ~7;
     samples_per_update_max_ = samples_per_update_ + 8;
@@ -54,6 +59,7 @@ EadMiddlePlayer::EadMiddlePlayer(const EadMiddleConfig& config, const EadEarlyFi
     updates_per_frame_ = updates * config.frames_per_list;
 
     InitVoiceLists();
+
     if (config.standard_microcode)
     {
         BuildRampTables();
@@ -79,6 +85,7 @@ EadMiddlePlayer::EadMiddlePlayer(const EadMiddleConfig& config, const EadEarlyFi
     bank_loaded_.assign(files.banks.size(), 0);
     book_addresses_.resize(files.banks.size());
     loop_addresses_.resize(files.banks.size());
+
     for (Player& player : players_)
     {
         player.channels.fill(kNoChannel);
@@ -137,6 +144,7 @@ void EadMiddlePlayer::AllocateReverbs(AudioMemory& memory)
         reverb.buffer_samples = int32_t{settings.window} * 64;
         reverb.left = memory.Allocate(static_cast<std::size_t>(reverb.buffer_samples) * 2);
         reverb.right = memory.Allocate(static_cast<std::size_t>(reverb.buffer_samples) * 2);
+
         for (std::vector<ReverbItem>& frame : reverb.items)
         {
             frame.resize(static_cast<std::size_t>(updates_per_frame_));
@@ -147,13 +155,14 @@ void EadMiddlePlayer::AllocateReverbs(AudioMemory& memory)
             reverb.downsample_pitch = static_cast<uint16_t>(0x8000 / reverb.downsample);
             reverb.resample_left = memory.Allocate(0x20);
             reverb.resample_right = memory.Allocate(0x20);
+
             for (std::vector<ReverbItem>& frame : reverb.items)
             {
                 for (ReverbItem& item : frame)
                 {
                     item.downsample_left = memory.Allocate(kTwoChannels);
                     item.downsample_right =
-                        item.downsample_left + (config_.standard_microcode ? kStdOneChannel : kOneChannel);
+                        item.downsample_left + (config_.standard_microcode ? standard::kOneChannel : kOneChannel);
                 }
             }
         }
@@ -172,15 +181,7 @@ const EadInstrument* EadMiddlePlayer::Instrument(int bank, int program) const
         return nullptr;
     }
 
-    const EadBank& held = files_->banks[static_cast<std::size_t>(bank)];
-    if (static_cast<std::size_t>(program) >= held.program_instruments.size())
-    {
-        return nullptr;
-    }
-
-    const int32_t object = held.program_instruments[static_cast<std::size_t>(program)];
-
-    return object == kNoObject ? nullptr : &held.instruments[static_cast<std::size_t>(object)];
+    return ead_common::ProgramInstrument(files_->banks[static_cast<std::size_t>(bank)], program);
 }
 
 const EadDrum* EadMiddlePlayer::Drum(int bank, int note) const
@@ -190,25 +191,12 @@ const EadDrum* EadMiddlePlayer::Drum(int bank, int note) const
         return nullptr;
     }
 
-    const EadBank& held = files_->banks[static_cast<std::size_t>(bank)];
-    if (static_cast<std::size_t>(note) >= held.drum_notes.size())
-    {
-        return nullptr;
-    }
-
-    const int32_t object = held.drum_notes[static_cast<std::size_t>(note)];
-
-    return object == kNoObject ? nullptr : &held.drums[static_cast<std::size_t>(object)];
+    return ead_common::NoteDrum(files_->banks[static_cast<std::size_t>(bank)], note);
 }
 
 const EadSample* EadMiddlePlayer::SampleOf(int bank, const EadTunedSample* sound) const
 {
-    if (sound == nullptr || sound->sample == kNoObject)
-    {
-        return nullptr;
-    }
-
-    return &files_->banks[static_cast<std::size_t>(bank)].samples[static_cast<std::size_t>(sound->sample)];
+    return ead_common::SoundSample(files_->banks, bank, sound);
 }
 
 EadMiddlePlayer::EnvelopeRef EadMiddlePlayer::BankEnvelope(int bank, int32_t envelope) const
@@ -276,6 +264,7 @@ void EadMiddlePlayer::InitChannels(int index, uint32_t mask)
             }
 
             player.channels[static_cast<std::size_t>(slot)] = channel;
+
             if (channel != kNoChannel)
             {
                 InitChannel(channel);
@@ -330,9 +319,10 @@ void EadMiddlePlayer::InitChannel(int index)
     channel.adsr.envelope = {};
     channel.adsr.release = 0x20;
     channel.adsr.sustain = 0;
-    channel.vibrato_rate_target = 0x800;
-    channel.vibrato_rate_start = 0x800;
+    channel.vibrato_rate_target = kChannelVibratoRate;
+    channel.vibrato_rate_start = kChannelVibratoRate;
     channel.ports.fill(-1);
+
     for (const ListKind kind : {kDisabled, kDecaying, kReleasing, kActive})
     {
         const int head = Head(ChannelPool(index), kind);
@@ -368,6 +358,7 @@ void EadMiddlePlayer::EnableChannel(int index, int slot, uint32_t script)
     channel.script.depth = 0;
     channel.script.pc = script;
     channel.delay = 0;
+
     for (int i = 0; i < kLayersPerChannel; i++)
     {
         FreeLayer(channel_index, i);
@@ -452,6 +443,7 @@ uint8_t EadMiddlePlayer::FindProgram(const Channel& channel, uint8_t program, co
 {
     const EadInstrument* instrument = Instrument(channel.bank, program);
     out = instrument;
+
     if (instrument == nullptr)
     {
         return 0;
@@ -549,6 +541,7 @@ void EadMiddlePlayer::Start(int index, int sequence, int fade_in_updates)
     player.script = {};
     player.delay = 0;
     player.enabled = true;
+
     if (fade_in_updates != 0)
     {
         player.state = 1;

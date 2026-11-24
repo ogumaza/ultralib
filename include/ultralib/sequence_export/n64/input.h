@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ntdlib/sequence_export/frame.h"
+
 #include "ultralib/sequence_export/n64/ead.h"
 #include "ultralib/sequence_export/n64/games.h"
 #include "ultralib/sequence_export/n64/image.h"

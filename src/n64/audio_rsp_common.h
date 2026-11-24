@@ -109,6 +109,22 @@ inline void RecordDma(AudioOps* ops, AudioOpKind kind, uint32_t dmem, uint32_t a
     }
 }
 
+// Copies 16 bytes of DMEM from `from` to `to` through a vector register. The moves of the microcodes work this way.
+// Both places wrap at the end of DMEM.
+inline void MoveDmem16(std::array<uint8_t, AudioRsp::kDmemSize>& dmem, uint32_t from, uint32_t to)
+{
+    std::array<uint8_t, 16> bytes;
+    for (uint32_t i = 0; i < 16; i++)
+    {
+        bytes[i] = dmem[(from + i) & kDmemMask];
+    }
+
+    for (uint32_t i = 0; i < 16; i++)
+    {
+        dmem[(to + i) & kDmemMask] = bytes[i];
+    }
+}
+
 // One step of a ramp that grows in a straight line, in each of the 8 lanes: the rate added to the value, with the
 // fractions' carry.
 inline void LinearStepLanes(Vector& whole, Vector& fraction, int16_t rate, uint16_t rate_fraction)

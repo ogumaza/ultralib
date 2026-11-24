@@ -31,8 +31,8 @@ inline constexpr uint32_t kEntryLoDirty = 1u << 2;
 inline constexpr int kEntryLoPfnShift = 6;
 inline constexpr uint32_t kEntryLoKeptBits = 0x03FFFFFE;
 
-// PageMask. The mask takes effect in pairs of bits. kPageMaskPairs has the low bit of each pair. kMinPairMask spans the
-// pair of 4 KiB pages that an entry of the smallest size covers.
+// PageMask. The mask takes effect in pairs of bits. kPageMaskPairs has the high bit of each pair. That bit sets the
+// whole pair. kMinPairMask spans the pair of 4 KiB pages that an entry of the smallest size covers.
 inline constexpr uint32_t kPageMaskMask = 0x01FFE000;
 inline constexpr uint32_t kPageMaskPairs = 0x01554000;
 inline constexpr uint32_t kMinPairMask = 0x1FFF;

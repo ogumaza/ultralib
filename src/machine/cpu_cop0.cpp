@@ -654,8 +654,8 @@ Cpu::TlbResult Cpu::LookupTlbPages(uint64_t vaddr, bool write, uint32_t& paddr) 
         return TlbResult::kHit;
     }
 
-    // No mapping. The scan takes in all 32 entries, and ignores their ASIDs, global bits and V bits. An unused entry of
-    // zeros therefore covers 0 to 0x1FFF.
+    // No mapping. The scan takes in all 32 entries, and ignores their ASIDs, global bits and V bits. An entry of zeros
+    // that a game writes therefore covers 0 to 0x1FFF.
     for (const TlbEntry& entry : tlb_)
     {
         if (MatchesVpn2(entry, vaddr))

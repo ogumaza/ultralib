@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: MIT
 
-// The sound banks of Nintendo EAD's sound engines for the Nintendo 64. A bank holds instruments, drums and, in the
+// The sound banks of Nintendo EAD's sound engines for the Nintendo 64. A bank contains instruments, drums and, in the
 // later engine, sound effects. Offsets in a bank count from its start and point to objects that several others can
 // share.
 //
-// An instrument holds a release rate, an envelope, and three samples with their tunings: one for low notes, one for its
-// normal range, and one for high notes. A drum holds a release rate, a pan, a sample with its tuning and an envelope.
-// An envelope is a list of pairs of 16-bit values: a delay and a target. It ends with a delay of 0, -1, -2 or -3, which
-// stop it, hold it, or send it to a pair or back to its start.
+// An instrument contains a release rate, an envelope, and three samples with their tunings: one for low notes, one for
+// its normal range, and one for high notes. A drum contains a release rate, a pan, a sample with its tuning and an
+// envelope. An envelope is a list of pairs of 16-bit values: a delay and a target. It ends with a delay of 0, -1, -2 or
+// -3. These stop it, hold it, or send it to a pair or back to its start.
 //
 // The early engine's bank starts with 16 bytes: the number of instruments, the number of drums, and 8 more bytes. The
 // offsets count from the end of those 16 bytes. An offset of the drums' table and of each instrument follow. A sample
-// holds two bytes of flags and two of padding, the sample's address, a loop, a book and its size.
+// contains two bytes of flags and two of padding, the sample's address, a loop, a book and its size.
 //
 // The later engine's bank gives its counts in the table of banks. It starts with the offsets of the drums' table and of
-// the sound effects, and the offset of each instrument follows. A sample holds its codec, its medium and its size in
-// one 32-bit field, then the address, a loop and a book. An address counts from the start of a table of samples. A
-// loop holds 16 bytes, with a state of 32 bytes after them if its count isn't 0.
+// the sound effects, and the offset of each instrument follows. A sample contains its codec, its medium and its size in
+// one 32-bit field, then the address, a loop and a book. An address counts from the start of a table of samples. A loop
+// is 16 bytes long. A state of 32 bytes follows it if its count isn't 0.
 //
 // The reader gathers each object once and keeps the bank's bytes. The writer lays the fields over those bytes at each
 // object's offset. An unchanged bank then comes back byte for byte. An object that the reader never saw goes at the
@@ -143,7 +143,7 @@ struct EadBank
 
     EadEngine engine = EadEngine::kEarly;
 
-    // What the lists below index. A program or a drum without an object holds kNoObject.
+    // What the lists below index. A program or a drum without an object contains kNoObject.
     std::vector<int32_t> program_instruments = {};
     std::vector<int32_t> drum_notes = {};
     std::vector<EadSoundEffect> effects = {};

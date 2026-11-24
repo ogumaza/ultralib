@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 // The numeric tables of Nintendo EAD's early sound engine, read from the rodata of Super Mario 64's American build.
-// Each comment gives the table's offset in that image. The numbers are the engine's facts about its console's mixing:
-// they aren't derived here, because a player that follows the engine has to use its exact values.
+// Each comment gives the table's offset in that image. The numbers are the engine's facts about its console's mixing.
+// They aren't derived here, because a player that follows the engine has to use its exact values.
+//
+// The later engine's data repeats five of the tables: the pan volumes and the short notes' velocities and gate times.
+// Those serve all three engines. Their comments also give the offset in the decoded code file of Ocarina of Time
+// (NUS-CZLE-USA, revision 2), where ead_later_tables.cpp reads the later engine's tables.
 
 #include "ead_tables.h"
 
@@ -73,7 +77,7 @@ const std::array<float, 255> kBendScale = {
     0x1.fa7104p0F,  0x1.fd3694p0F,  0x1.p1F,
 };
 
-// Offset 0xEF1F4.
+// Offset 0xEF1F4, and 0xF0298 in Ocarina of Time.
 const std::array<float, 128> kDefaultPanVolume = {
     0x1.p0F,        0x1.fff60ap-1F, 0x1.ffd7e4p-1F, 0x1.ffa5d2p-1F, 0x1.ff5f92p-1F, 0x1.ff0564p-1F, 0x1.fe974ap-1F,
     0x1.fe1502p-1F, 0x1.fd7eeep-1F, 0x1.fcd4ccp-1F, 0x1.fc16bep-1F, 0x1.fb44c4p-1F, 0x1.fa5efep-1F, 0x1.f9654ep-1F,
@@ -96,7 +100,7 @@ const std::array<float, 128> kDefaultPanVolume = {
     0x1.95464ep-7F, 0x0.0p0F,
 };
 
-// Offset 0xEEFF4.
+// Offset 0xEEFF4, and 0xF0098 in Ocarina of Time.
 const std::array<float, 128> kStereoPanVolume = {
     0x1.69fbe8p-1F, 0x1.6eb57p-1F,  0x1.736f1ap-1F, 0x1.7828a2p-1F, 0x1.7ce22ap-1F, 0x1.819bd4p-1F, 0x1.86555cp-1F,
     0x1.8b0ee4p-1F, 0x1.8fc88ep-1F, 0x1.948216p-1F, 0x1.993bap-1F,  0x1.9df548p-1F, 0x1.a2aed2p-1F, 0x1.a7685ap-1F,
@@ -119,7 +123,7 @@ const std::array<float, 128> kStereoPanVolume = {
     0x1.5e9532p-2F, 0x1.69fbe8p-2F,
 };
 
-// Offset 0xEEDF4.
+// Offset 0xEEDF4, and 0xEFE98 in Ocarina of Time.
 const std::array<float, 128> kHeadsetPanVolume = {
     0x1.p0F,        0x1.fda33cp-1F, 0x1.fb4678p-1F, 0x1.f8e992p-1F, 0x1.f68ccep-1F, 0x1.f4300ap-1F, 0x1.f1d346p-1F,
     0x1.ef7682p-1F, 0x1.ed19bep-1F, 0x1.eabcd8p-1F, 0x1.e86014p-1F, 0x1.e6035p-1F,  0x1.e3a68cp-1F, 0x1.e149c6p-1F,
@@ -286,10 +290,10 @@ const std::array<int8_t, 16> kVibratoCurve = {0, 8, 16, 24, 32, 40, 48, 56, 64, 
 // Offset 0xEEDE0.
 const std::array<uint16_t, 10> kHeadsetPanDelay = {64, 48, 32, 16, 0, 0, 0, 0, 0, 0};
 
-// Offset 0xEEB94.
+// Offset 0xEEB94, and 0xEFD24 in Ocarina of Time.
 const std::array<uint8_t, 16> kShortVelocity = {12, 25, 38, 51, 57, 64, 71, 76, 83, 89, 96, 102, 109, 115, 121, 127};
 
-// Offset 0xEEBA4.
+// Offset 0xEEBA4, and 0xEFD34 in Ocarina of Time.
 const std::array<uint8_t, 16> kShortGate = {229, 203, 177, 151, 139, 126, 113, 100, 87, 74, 61, 48, 36, 23, 10, 0};
 
 // Offsets 0xEED50, 0xEECD0, 0xEEBD0, 0xEEC50.

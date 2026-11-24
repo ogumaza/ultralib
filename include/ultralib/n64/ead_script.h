@@ -2,12 +2,14 @@
 
 // The sequences of Nintendo EAD's sound engines for the Nintendo 64. A sequence is a program in three levels. The
 // script of the sequence starts at offset 0 and starts channels. A channel's script sets the channel's sound and starts
-// note layers. A layer's script plays notes. The levels have separate commands. The commands at 0xF2 and up that
-// change the flow of a script are shared. Offsets in a sequence are big-endian and count from its start. A variable
-// length has one byte, or two when the top bit of the first is set: 15 bits, the high bits first.
+// note layers. A layer's script plays notes. The levels have separate commands. The commands at 0xF5 and up that
+// change the flow of a script are shared. The middle and later engines add relative jumps at 0xF2 to 0xF4. Offsets in a
+// sequence are big-endian and count from its start. A variable length has one byte, or two when the top bit of the
+// first is set: 15 bits, the high bits first.
 //
-// The early engine (Super Mario 64, Wave Race 64 and Mario Kart 64) and the later engine (Ocarina of Time, Majora's
-// Mask and the two Pokémon Stadiums) share the notes and most commands. The later engine renames some and adds others.
+// The early engine (Super Mario 64), the middle engine (Wave Race 64 and Mario Kart 64) and the later engine (Ocarina
+// of Time, Majora's Mask and Pokémon Stadium 2) share the notes and most commands. The later engine renames some and
+// adds others.
 //
 // ReadScriptCommand reads one command as the engine's player does. WalkScript follows every path from a sequence's
 // start that doesn't depend on the values the scripts compute. It gives the commands it reached and the offsets where
@@ -30,7 +32,7 @@ enum class EadEngine : uint8_t
 {
     kEarly,      // Super Mario 64's American and Japanese builds
     kMiddle,     // Wave Race 64 and Mario Kart 64: the early engine's files with more commands
-    kLater,      // Ocarina of Time and Pokémon Stadium
+    kLater,      // Ocarina of Time
     kLaterMajora // Majora's Mask and Pokémon Stadium 2
 };
 
@@ -41,7 +43,7 @@ enum class ScriptLevel : uint8_t
     kLayer
 };
 
-// What a command does, whichever opcode holds it on an engine. Arguments are in `ScriptCommand::args`, in the order of
+// What a command does, whichever opcode it has on an engine. Arguments are in `ScriptCommand::args`, in the order of
 // the command's bytes.
 enum class ScriptOp : uint8_t
 {
@@ -85,8 +87,8 @@ enum class ScriptOp : uint8_t
     kAddTempo,
     kVolume,
     kAddVolume,       // the early engine
-    kVolumeMode,      // the later engine
-    kVolumeScale,     // the later engine
+    kVolumeMode,      // the middle and later engines
+    kVolumeScale,     // the middle and later engines
     kInitChannels,    // args[0] is a mask
     kDisableChannels, // args[0] is a mask
     kMuteScale,
@@ -168,8 +170,8 @@ enum class ScriptOp : uint8_t
     kSampleStart,        // Majora's Mask: the point in a sample that notes start from
     kChannelArgument,    // an argument that a later command of the channel reads
 
-    // The layers' level. A note's low 6 bits hold its pitch. args holds what its form reads: delay, velocity and gate
-    // time, -1 where the form reads nothing.
+    // The layers' level. A note's low 6 bits hold its pitch. args contains what its form reads: delay, velocity and
+    // gate time, -1 where the form reads nothing.
     kNote,
     kLayerDelay,
     kShortVelocity,
@@ -204,8 +206,8 @@ struct ScriptCommand
     uint8_t low_bits = 0; // the part of the opcode that holds a number, where the command has one
     ScriptOp op = ScriptOp::kUnknown;
 
-    // The arguments in the order of the bytes. An unused one holds -1. Offsets and 16-bit fields come out as their
-    // unsigned values, and 8-bit signed fields as their signed values. kParameters holds its 8 bytes in `bytes`.
+    // The arguments in the order of the bytes. An unused one is -1. Offsets and 16-bit fields come out as their
+    // unsigned values, and 8-bit signed fields as their signed values. For kParameters, `bytes` contains its 8 bytes.
     std::array<int32_t, 3> args = {-1, -1, -1};
     std::array<uint8_t, 8> bytes = {};
 };
@@ -230,7 +232,7 @@ struct WalkedCommand
 struct ScriptWalk
 {
     std::vector<WalkedCommand> commands; // in the order of their offsets
-    std::vector<uint32_t> bad_offsets;   // where a path met an opcode that the engine lacks, or left the sequence
+    std::vector<uint32_t> bad_offsets;   // where a path met an opcode missing from the engine, or left the sequence
     std::map<uint32_t, ScriptLevel> bad_levels; // the level of the script at each of those offsets
     std::size_t notes = 0;
 

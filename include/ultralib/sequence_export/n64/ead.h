@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 // The games on Nintendo EAD's sound engines. A sequence is a program in three levels: the sequence's script starts
-// channels, a channel's script sets its sound and starts note layers, and a layer's script plays notes. The performer
-// runs the scripts tick by tick, as the engines' players do. A note's level follows the engines' arithmetic:
+// channels, a channel's script sets its sound and starts note layers, and a layer's script plays notes. Like the
+// engines' players, the performer runs the scripts tick by tick. A note's level follows the engines' arithmetic:
 //
 // - A note plays at the square of its velocity, times the channel's volumes, times the envelope. EadLevels says what
-// the
-//   envelope and the volumes come to in each build. Velocity, CC7 and CC11 act squared in SoundFont and SFZ. CC7 and
-//   CC11 hold the square root of the volumes where they act directly, and the volumes themselves where they act
+//   the envelope and the volumes come to in each build. Velocity, CC7 and CC11 act squared in SoundFont and SFZ. CC7
+//   and CC11 hold the square root of the volumes where they act directly, and the volumes themselves where they act
 //   squared.
-// - An envelope is a list of straight lines. SoundFont's envelopes can't follow them exactly. A fit keeps each
-// segment's
-//   end and its energy.
+// - An envelope is a list of straight lines. SoundFont's envelopes can't follow them exactly. A fit keeps the end and
+//   the energy of each segment.
 // - A note's release is a straight line too, from where the note stands to nothing.
 // - The mixer's pans are the sin/cos law of MIDI RP-036.
 // - A note's pitch is the sample's tuning times two to the power of its key's distance from key 39, in twelfths.
@@ -30,6 +28,7 @@
 #include <vector>
 
 #include "ntdlib/sequence_export/frame.h"
+
 #include "ultralib/n64/ead_bank.h"
 #include "ultralib/n64/ead_later.h"
 #include "ultralib/n64/ead_script.h"
@@ -112,7 +111,7 @@ std::vector<Zone> EadZones(const EadPresetKey& key, const ultralib::n64::EadBank
 class EadGame
 {
 public:
-    // Reads the game's tables from `image`, which stays valid while the game lives. Returns nullptr for an image
+    // Reads the game's tables from `image`. The image stays valid while the game lives. Returns nullptr for an image
     // without them.
     static std::unique_ptr<EadGame> Open(std::span<const uint8_t> image, const EadProfile& profile);
 

@@ -7,18 +7,12 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <deque>
-#include <stdexcept>
-#include <utility>
 #include <vector>
 
-#include "xsflib/binary.h"
-
 #include "al_synth_constants.h"
+#include "compact_synthesis.h"
 #include "round_toward_zero.h"
 
 namespace ultralib::n64
@@ -167,32 +161,6 @@ const std::vector<int32_t>& EffectParameters(AlEffect effect, const std::vector<
     return kNull;
 }
 
-void InitLowPass(AudioMemory& memory, int16_t cutoff, int16_t& gain, std::array<int16_t, 16>& coefficients, bool& first,
-                 uint32_t address)
-{
-    constexpr int kScale = 16384;
-    const int32_t scaled = cutoff * kScale;
-    const auto fc = static_cast<int16_t>(scaled >> 15);
-    gain = static_cast<int16_t>(kScale - fc);
-    first = true;
-    coefficients.fill(0);
-    coefficients[8] = fc;
-    double running = static_cast<double>(fc) / kScale;
-    const double step = running;
-    for (std::size_t i = 9; i < coefficients.size(); i++)
-    {
-        running *= step;
-        coefficients[i] = static_cast<int16_t>(static_cast<int32_t>(running * kScale));
-    }
-
-    std::array<uint8_t, 32> bytes = {};
-    for (std::size_t i = 0; i < coefficients.size(); i++)
-    {
-        xsflib::StoreBe16(bytes.data() + i * 2, static_cast<uint16_t>(coefficients[i]));
-    }
-
-    memory.Write(address, bytes.data(), bytes.size());
-}
 } // namespace
 
 AlSynth::AlSynth(const AlSynthConfig& config, AudioMemory& memory)
@@ -276,8 +244,7 @@ void AlSynth::InitFx(const AlSynthConfig& config, AudioMemory& memory)
             }
             else
             {
-                InitLowPass(memory, delay.low_pass.cutoff, delay.low_pass.gain, delay.low_pass.coefficients,
-                            delay.low_pass.first, delay.low_pass.coefficients_address);
+                compact_synthesis::InitLowPass(memory, delay.low_pass);
             }
         }
     }

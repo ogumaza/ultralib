@@ -70,7 +70,7 @@ struct MidiEvent
     // The index in the track of the loop start that a compressed loop end leads back to, or -1.
     int32_t loop_start = -1;
 
-    // The offset in the file of the first byte of the event. For an event that a block holds, it lies in the block's
+    // The offset in the file of the first byte of the event. For an event inside a block, the offset is in the block's
     // source. It's the place that a sequence player reads the event from.
     uint32_t file_offset = 0;
 };

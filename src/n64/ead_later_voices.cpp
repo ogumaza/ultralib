@@ -10,9 +10,12 @@
 #include <optional>
 #include <vector>
 
+#include "ead_constants.h"
 #include "ead_later_constants.h"
 #include "ead_later_tables.h"
 #include "ead_lists.h"
+#include "ead_tables.h"
+#include "ead_voice_lists.h"
 #include "ultralib/n64/ead_later.h"
 
 namespace ultralib::n64
@@ -21,11 +24,14 @@ namespace ultralib::n64
 namespace
 {
 
-using ead_later_constants::kMuteSoften;
-using ead_later_constants::kMuteStopNotes;
+using ead_constants::kMuteSoften;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kPriorityDisabled;
+using ead_constants::kPriorityStopping;
+using ead_constants::kWaveSamples;
 using ead_later_constants::kMuteStopVoices;
-using ead_later_constants::kWaveSamples;
 using ead_lists::WriteBe16;
+using ead_voice_lists::kNoVoice;
 
 namespace tables = ead_later_tables;
 
@@ -42,152 +48,62 @@ constexpr int32_t kLayerVibratoRate = 0x800;
 constexpr std::array<EadEnvelope::Point, 4> kDefaultEnvelope = {
     {{1, 32000}, {1000, 32000}, {kEnvelopeHang, 0}, {kEnvelopeDisable, 0}}};
 
+// The later engine takes only a voice of lower priority than the new note.
+constexpr auto kPriorityRule = ead_voice_lists::PriorityRule::kLower;
+
+// A priority above that of every voice. The search for a voice to take starts from it.
+constexpr int kPriorityAboveAny = 0x10;
+
 } // namespace
 
 int EadLaterPlayer::Head(int pool, ListKind kind) const
 {
-    return static_cast<int>(voices_.size()) + pool * 4 + kind;
+    return ead_voice_lists::Head(static_cast<int>(voices_.size()), pool, kind);
 }
 
 int EadLaterPlayer::PlayerPool(int player) const
 {
-    return 1 + player;
+    return ead_voice_lists::PlayerPool(player);
 }
 
 int EadLaterPlayer::ChannelPool(int channel) const
 {
-    return 1 + kPlayers + channel;
+    return ead_voice_lists::ChannelPool(kPlayers, channel);
 }
 
 void EadLaterPlayer::PushBack(int head, int voice)
 {
-    const auto node = static_cast<std::size_t>(voice);
-    if (previous_[node] != -1)
-    {
-        return;
-    }
-
-    const int tail = previous_[static_cast<std::size_t>(head)];
-    next_[static_cast<std::size_t>(tail)] = voice;
-    previous_[node] = tail;
-    next_[node] = head;
-    previous_[static_cast<std::size_t>(head)] = voice;
-    voices_[node].pool = (head - static_cast<int>(voices_.size())) / 4;
+    ead_voice_lists::PushBack(next_, previous_, voices_, head, voice);
 }
 
 void EadLaterPlayer::PushFront(int head, int voice)
 {
-    const auto node = static_cast<std::size_t>(voice);
-    if (previous_[node] != -1)
-    {
-        return;
-    }
-
-    const int first = next_[static_cast<std::size_t>(head)];
-    previous_[node] = head;
-    next_[node] = first;
-    previous_[static_cast<std::size_t>(first)] = voice;
-    next_[static_cast<std::size_t>(head)] = voice;
-    voices_[node].pool = (head - static_cast<int>(voices_.size())) / 4;
+    ead_voice_lists::PushFront(next_, previous_, voices_, head, voice);
 }
 
 int EadLaterPlayer::PopBack(int head)
 {
-    const int item = previous_[static_cast<std::size_t>(head)];
-    if (item == head)
-    {
-        return -1;
-    }
-
-    const int before = previous_[static_cast<std::size_t>(item)];
-    next_[static_cast<std::size_t>(before)] = head;
-    previous_[static_cast<std::size_t>(head)] = before;
-    previous_[static_cast<std::size_t>(item)] = -1;
-
-    return item;
+    return ead_voice_lists::PopBack(next_, previous_, head);
 }
 
 void EadLaterPlayer::Remove(int voice)
 {
-    const auto node = static_cast<std::size_t>(voice);
-    if (previous_[node] == -1)
-    {
-        return;
-    }
-
-    next_[static_cast<std::size_t>(previous_[node])] = next_[node];
-    previous_[static_cast<std::size_t>(next_[node])] = previous_[node];
-    previous_[node] = -1;
+    ead_voice_lists::Remove(next_, previous_, voice);
 }
 
 void EadLaterPlayer::ClearPool(int pool)
 {
-    for (const ListKind kind : {kDisabled, kDecaying, kReleasing, kActive})
-    {
-        const int source = Head(pool, kind);
-        const int target = Head(0, kind);
-        while (true)
-        {
-            const int voice = next_[static_cast<std::size_t>(source)];
-            if (voice == source || voice == -1)
-            {
-                break;
-            }
-
-            Remove(voice);
-            PushBack(target, voice);
-        }
-    }
+    ead_voice_lists::ClearPool(next_, previous_, voices_, pool);
 }
 
 void EadLaterPlayer::FillPool(int pool, int count)
 {
-    ClearPool(pool);
-    int taken = 0;
-    for (const ListKind kind : {kDisabled, kDecaying, kReleasing, kActive})
-    {
-        while (taken < count)
-        {
-            const int voice = PopBack(Head(0, kind));
-            if (voice == -1)
-            {
-                break;
-            }
-
-            PushBack(Head(pool, kind), voice);
-            taken++;
-        }
-
-        if (taken >= count)
-        {
-            return;
-        }
-    }
+    ead_voice_lists::FillPool(next_, previous_, voices_, pool, count);
 }
 
 int EadLaterPlayer::FindLowerPriority(int head, int limit) const
 {
-    int current = next_[static_cast<std::size_t>(head)];
-    if (current == head)
-    {
-        return -1;
-    }
-
-    int best = current;
-    for (; current != head; current = next_[static_cast<std::size_t>(current)])
-    {
-        if (voices_[static_cast<std::size_t>(best)].priority >= voices_[static_cast<std::size_t>(current)].priority)
-        {
-            best = current;
-        }
-    }
-
-    if (limit <= voices_[static_cast<std::size_t>(best)].priority)
-    {
-        return -1;
-    }
-
-    return best;
+    return ead_voice_lists::FindLowerPriority(next_, voices_, head, limit, kPriorityRule);
 }
 
 EadEnvelope::Point EadLaterPlayer::EnvelopePoint(const EnvelopeRef& envelope, int index) const
@@ -235,6 +151,7 @@ void EadLaterPlayer::PlayerSound(int index)
     {
         player.fade_volume += player.fade_step;
         player.recalculate_volume = true;
+
         if (player.fade_volume > 1.0F)
         {
             player.fade_volume = 1.0F;
@@ -279,6 +196,7 @@ void EadLaterPlayer::SetLayerNoteStadium2(Layer& layer, const Channel& channel, 
     // With the pan's flag clear, the code writes the layer's pan to the note's velocity.
     const bool all = layer.properties_need_init;
     layer.properties_need_init = false;
+
     if (all || channel.change_frequency)
     {
         layer.note_frequency =
@@ -369,7 +287,7 @@ void EadLaterPlayer::ChannelSound(int index, bool recalculate_volume, bool apply
         }
 
         Layer& layer = layers_[static_cast<std::size_t>(layer_index)];
-        if (!layer.enabled || layer.voice == -1)
+        if (!layer.enabled || layer.voice == kNoVoice)
         {
             continue;
         }
@@ -434,7 +352,6 @@ void EadLaterPlayer::ReadEnvelopePoints(Adsr& adsr)
             adsr.phase = AdsrPhase::kFade;
             adsr.index++;
         }
-
         break;
     }
 }
@@ -469,6 +386,7 @@ float EadLaterPlayer::UpdateAdsr(Adsr& adsr)
     {
     case AdsrPhase::kDisabled:
         return 0.0F;
+
     case AdsrPhase::kInitial:
         if (adsr.hang)
         {
@@ -477,10 +395,12 @@ float EadLaterPlayer::UpdateAdsr(Adsr& adsr)
         }
 
         [[fallthrough]];
+
     case AdsrPhase::kStartLoop:
         adsr.index = 0;
         adsr.phase = AdsrPhase::kLoop;
         [[fallthrough]];
+
     case AdsrPhase::kLoop:
         ReadEnvelopePoints(adsr);
         if (adsr.phase != AdsrPhase::kFade)
@@ -489,6 +409,7 @@ float EadLaterPlayer::UpdateAdsr(Adsr& adsr)
         }
 
         [[fallthrough]];
+
     case AdsrPhase::kFade:
         adsr.current += adsr.velocity;
         adsr.delay--;
@@ -496,21 +417,22 @@ float EadLaterPlayer::UpdateAdsr(Adsr& adsr)
         {
             adsr.phase = AdsrPhase::kLoop;
         }
-
         break;
+
     case AdsrPhase::kHang:
         break;
+
     case AdsrPhase::kDecay:
     case AdsrPhase::kRelease:
         FadeAdsr(adsr, phase);
         break;
+
     case AdsrPhase::kSustain:
         adsr.delay--;
         if (adsr.delay == 0)
         {
             adsr.phase = AdsrPhase::kRelease;
         }
-
         break;
     }
 
@@ -707,7 +629,8 @@ void EadLaterPlayer::DecayOrRelease(int index, AdsrPhase target)
 
     Layer& layer = layers_[static_cast<std::size_t>(index)];
     layer.loaded = false;
-    if (layer.voice == -1)
+
+    if (layer.voice == kNoVoice)
     {
         return;
     }
@@ -787,7 +710,7 @@ void EadLaterPlayer::DisableVoice(Voice& voice)
         voice.state.needs_init = false;
     }
 
-    voice.priority = 0;
+    voice.priority = kPriorityDisabled;
     voice.state.enabled = false;
     voice.release_kind = 0;
     voice.state.finished = false;
@@ -911,49 +834,45 @@ void EadLaterPlayer::TakeAfterRelease(int index, int layer_index)
 
 int EadLaterPlayer::AllocFromDisabled(int pool, int layer)
 {
-    const int voice = PopBack(Head(pool, kDisabled));
-    if (voice != -1)
+    const auto take = [&](int voice)
     {
         InitVoiceForLayer(voice, layer);
-        PushFront(Head(pool, kActive), voice);
-    }
+    };
 
-    return voice;
+    return ead_voice_lists::AllocFromDisabled(next_, previous_, voices_, pool, take);
 }
 
 int EadLaterPlayer::AllocFromDecaying(int pool, int layer)
 {
-    const int voice = PopBack(Head(pool, kDecaying));
-    if (voice != -1)
+    const auto take = [&](int voice)
     {
         TakeAfterRelease(voice, layer);
-        PushBack(Head(pool, kReleasing), voice);
-    }
+    };
 
-    return voice;
+    return ead_voice_lists::AllocFromDecaying(next_, previous_, voices_, pool, take);
 }
 
 int EadLaterPlayer::AllocFromActive(int pool, int layer_index)
 {
     const int priority =
         channels_[static_cast<std::size_t>(layers_[static_cast<std::size_t>(layer_index)].channel)].priority;
-    int releasing_priority = 0x10;
-    int active_priority = 0x10;
+    int releasing_priority = kPriorityAboveAny;
+    int active_priority = kPriorityAboveAny;
     const int releasing = FindLowerPriority(Head(pool, kReleasing), priority);
-    if (releasing != -1)
+    if (releasing != kNoVoice)
     {
         releasing_priority = voices_[static_cast<std::size_t>(releasing)].priority;
     }
 
     const int active = FindLowerPriority(Head(pool, kActive), priority);
-    if (active != -1)
+    if (active != kNoVoice)
     {
         active_priority = voices_[static_cast<std::size_t>(active)].priority;
     }
 
-    if (releasing == -1 && active == -1)
+    if (releasing == kNoVoice && active == kNoVoice)
     {
-        return -1;
+        return kNoVoice;
     }
 
     if (active_priority < releasing_priority)
@@ -985,7 +904,7 @@ int EadLaterPlayer::AllocVoice(int index)
     if ((policy & 1) != 0)
     {
         const int voice_index = layer.voice;
-        if (voice_index != -1)
+        if (voice_index != kNoVoice)
         {
             Voice& voice = voices_[static_cast<std::size_t>(voice_index)];
             if (voice.previous_layer == index && voice.wanted_layer == kNoLayer)
@@ -999,13 +918,13 @@ int EadLaterPlayer::AllocVoice(int index)
         }
     }
 
-    int voice = -1;
+    int voice = kNoVoice;
     const auto try_pools = [&](std::initializer_list<int> pools)
     {
         for (const int pool : pools)
         {
             voice = AllocFromDisabled(pool, index);
-            if (voice != -1)
+            if (voice != kNoVoice)
             {
                 return;
             }
@@ -1014,7 +933,7 @@ int EadLaterPlayer::AllocVoice(int index)
         for (const int pool : pools)
         {
             voice = AllocFromDecaying(pool, index);
-            if (voice != -1)
+            if (voice != kNoVoice)
             {
                 return;
             }
@@ -1023,7 +942,7 @@ int EadLaterPlayer::AllocVoice(int index)
         for (const int pool : pools)
         {
             voice = AllocFromActive(pool, index);
-            if (voice != -1)
+            if (voice != kNoVoice)
             {
                 return;
             }
@@ -1047,7 +966,7 @@ int EadLaterPlayer::AllocVoice(int index)
         try_pools({channel_pool, player_pool, 0});
     }
 
-    if (voice == -1)
+    if (voice == kNoVoice)
     {
         layer.loaded = true;
     }
@@ -1078,8 +997,8 @@ std::array<float, 2> EadLaterPlayer::ApplyPan(const Voice& voice, UpdateState& s
         state.delay_right = static_cast<uint8_t>(tables::kHaasDelays[static_cast<std::size_t>(half)]);
         state.delay_left = static_cast<uint8_t>(tables::kHaasDelays[static_cast<std::size_t>(0x3F - half)]);
         state.use_delay = true;
-        left = tables::kHeadsetPanVolume[pan];
-        right = tables::kHeadsetPanVolume[0x7FU - pan];
+        left = ead_tables::kHeadsetPanVolume[pan];
+        right = ead_tables::kHeadsetPanVolume[0x7FU - pan];
     }
     else if (voice.stereo_effects && config_.output == EadLaterOutput::kStereo)
     {
@@ -1088,8 +1007,8 @@ std::array<float, 2> EadLaterPlayer::ApplyPan(const Voice& voice, UpdateState& s
         state.delay_left = 0;
         state.delay_right = 0;
         state.use_delay = false;
-        left = tables::kStereoPanVolume[pan];
-        right = tables::kStereoPanVolume[0x7FU - pan];
+        left = ead_tables::kStereoPanVolume[pan];
+        right = ead_tables::kStereoPanVolume[0x7FU - pan];
         state.strong_right = strong_right;
         state.strong_left = strong_left;
         switch ((stereo >> 4) & 3)
@@ -1098,14 +1017,17 @@ std::array<float, 2> EadLaterPlayer::ApplyPan(const Voice& voice, UpdateState& s
             state.strong_right = strong_right_bit;
             state.strong_left = strong_left_bit;
             break;
+
         case 2:
             state.strong_right = strong_right_bit || strong_right;
             state.strong_left = strong_left_bit || strong_left;
             break;
+
         case 3:
             state.strong_right = strong_right_bit != strong_right;
             state.strong_left = strong_left_bit != strong_left;
             break;
+
         default:
             break;
         }
@@ -1121,8 +1043,8 @@ std::array<float, 2> EadLaterPlayer::ApplyPan(const Voice& voice, UpdateState& s
     {
         state.strong_right = strong_right_bit;
         state.strong_left = strong_left_bit;
-        left = tables::kDefaultPanVolume[pan];
-        right = tables::kDefaultPanVolume[0x7FU - pan];
+        left = ead_tables::kDefaultPanVolume[pan];
+        right = ead_tables::kDefaultPanVolume[0x7FU - pan];
     }
 
     return {left, right};
@@ -1190,10 +1112,10 @@ void EadLaterPlayer::ReleaseStoppedVoice(Voice& voice, int index)
     {
         voice.adsr.release = true;
         voice.adsr.fade_step = updates_inverse_;
-        voice.priority = 1;
+        voice.priority = kPriorityStopping;
         voice.release_kind = 2;
     }
-    else if (!layer.enabled && voice.release_kind == 0 && voice.priority >= 1)
+    else if (!layer.enabled && voice.release_kind == 0 && voice.priority >= kPriorityStopping)
     {
         release_now = true;
     }
@@ -1207,7 +1129,7 @@ void EadLaterPlayer::ReleaseStoppedVoice(Voice& voice, int index)
         DecayOrRelease(voice.layer, AdsrPhase::kRelease);
         Remove(index);
         PushFront(Head(voice.pool, kDecaying), index);
-        voice.priority = 1;
+        voice.priority = kPriorityStopping;
         voice.release_kind = 2;
     }
 }
@@ -1283,6 +1205,7 @@ void EadLaterPlayer::RecordUpdate(Voice& voice, UpdateState& recorded)
         reverb = (layer.flags & kLayerUsesChannelReverb) != 0 ? channel.reverb : layer.reverb;
         surround = layer.surround == 0x80 ? channel.surround : layer.surround;
         gain = (layer.flags & kLayerUsesChannelGain) != 0 ? channel.gain : uint8_t{0};
+
         if (channel.filter != -1)
         {
             filter = FilterRef{channel.player, static_cast<uint32_t>(channel.filter), false};
@@ -1291,6 +1214,7 @@ void EadLaterPlayer::RecordUpdate(Voice& voice, UpdateState& recorded)
         comb_size = channel.comb_size;
         comb_gain = channel.comb_gain;
         book_offset = channel.book_offset & 0x7;
+
         if (players_[static_cast<std::size_t>(channel.player)].muted && (channel.mute_behavior & kMuteStopVoices) != 0)
         {
             frequency = 0.0F;
@@ -1316,12 +1240,12 @@ void EadLaterPlayer::ProcessVoices(int state_offset)
         {
             ReleaseStoppedVoice(voice, index);
         }
-        else if (voice.release_kind == 0 && voice.priority >= 1)
+        else if (voice.release_kind == 0 && voice.priority >= kPriorityStopping)
         {
             continue;
         }
 
-        if (voice.priority == 0)
+        if (voice.priority == kPriorityDisabled)
         {
             continue;
         }

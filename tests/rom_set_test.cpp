@@ -31,7 +31,7 @@ using xsflib::testing::ZipArchive;
 constexpr char kProgram[] = "the test";
 
 // Three games of synthetic chips, each pair of bytes reversed as the sets store them. Game A has two chips, game B
-// one. Game C needs a chip that no file holds.
+// one. Game C requires a chip that no file holds.
 const std::vector<uint8_t> kLowChip = {0x80, 0x37, 0x12, 0x40};
 const std::vector<uint8_t> kHighChip = {0x02, 0x01, 0x04, 0x03};
 const std::vector<uint8_t> kOtherChip = {0x0B, 0x0A, 0x0D, 0x0C, 0x0F, 0x0E};
@@ -84,8 +84,8 @@ void KnownSets()
     XSFLIB_CHECK(ultralib::machine::FindAleck64Set("0000000000000000000000000000000000000000") == nullptr);
 }
 
-// A folder with every chip of games A and B: A comes first, and B is the other game. A's second set has A's image, so
-// it isn't another game.
+// A folder with every chip of games A and B: A comes first, and B is the other game. A's second set has A's image and
+// isn't another game.
 void TwoGames()
 {
     const xsflib::testing::TempFolder folder("ultralib_rom_set_two");

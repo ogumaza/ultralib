@@ -3,7 +3,7 @@
 // libultra's bank file: the instruments of a sound bank, without their sample data. The SDK's tools make it from a text
 // description. It is the .ctl file beside a .tbl file of samples. Every field is big-endian. The file starts with the
 // revision "B1" and a table of offsets of banks. The objects of a bank point to each other by their offsets from the
-// file's start. Two pointers can share one object. An object lies on a multiple of 8 bytes.
+// file's start. Two pointers can share one object. An object starts on a multiple of 8 bytes.
 //
 //     bank:       a count of instruments, flags, padding, a sample rate, a percussion instrument and the instruments
 //     instrument: volume, pan, priority, flags, tremolo and vibrato settings, a pitch bend range and the sounds
@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -45,7 +44,7 @@ struct BankEnvelope
 
     uint32_t offset = kNoOffset;
 
-    // Times in microseconds. A release time of -1 holds the sound.
+    // Times in microseconds. A decay time of -1 holds the sound.
     int32_t attack_time = 0;
     int32_t decay_time = 0;
     int32_t release_time = 0;

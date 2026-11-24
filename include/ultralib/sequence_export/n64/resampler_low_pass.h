@@ -27,8 +27,8 @@ namespace ultralib::sequence_export::n64
 inline constexpr std::size_t kResamplerLowPassTaps = 5;
 const std::array<int16_t, kResamplerLowPassTaps>& ResamplerLowPass();
 
-// `pcm` through the filter, at the same length. Before the first sample, the filter reads zeros, which the resampler's
-// state holds at a voice's start. A loop is filtered as it repeats: its first samples read its last ones, and its last
+// `pcm` through the filter, at the same length. Before the first sample, the filter reads zeros. The resampler's state
+// holds zeros at a voice's start. A loop is filtered as it repeats: its first samples read its last ones, and its last
 // samples read its first ones. The samples before the loop read the loop's first samples after them. A wave without a
 // loop reads zeros after its end. A sample that the filter takes past 16 bits is limited, and `clipped` counts it.
 seqlib::Pcm ApplyResamplerLowPass(const seqlib::Pcm& pcm, std::size_t* clipped = nullptr);

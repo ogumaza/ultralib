@@ -205,7 +205,7 @@ void Eeprom(EepromType type)
     const std::vector<uint8_t> wrapped = Reply(pif, read_offsets[4], 2, 8);
 
     // The identifier is 0x0080 for 4 Kbit and 0x00C0 for 16 Kbit. A write answers 0x00 when it starts. The 4 Kbit part
-    // ignores the top two bits of the block number, so block 67 is block 3.
+    // ignores the top two bits of the block number: block 67 is block 3.
     const bool small = type == EepromType::k4Kbit;
     XSFLIB_CHECK(write_status == 1);
     XSFLIB_CHECK(write_reply == std::vector<uint8_t>({0x00}));

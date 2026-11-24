@@ -14,6 +14,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/audio_list.h"
 #include "ultralib/n64/audio_memory.h"
 #include "ultralib/n64/ead_bank.h"
@@ -28,91 +29,79 @@ namespace
 {
 
 namespace n64 = ultralib::n64;
-using Bytes = std::vector<uint8_t>;
 using n64::EadEngine;
 using n64::ScriptLevel;
 using n64::ScriptOp;
-
-void Put16(Bytes& bytes, uint16_t value)
-{
-    bytes.push_back(static_cast<uint8_t>(value >> 8));
-    bytes.push_back(static_cast<uint8_t>(value));
-}
-
-void Put32(Bytes& bytes, uint32_t value)
-{
-    Put16(bytes, static_cast<uint16_t>(value >> 16));
-    Put16(bytes, static_cast<uint16_t>(value));
-}
+using ultralib::testing::Bytes;
 
 // An early bank with one instrument and one drum. Their samples share a book and a loop.
 Bytes EarlyBank()
 {
     Bytes bank;
-    Put32(bank, 1); // instruments
-    Put32(bank, 1); // drums
-    Put32(bank, 0);
-    Put32(bank, 0x19960214);
+    xsflib::AppendBe32(bank, 1); // instruments
+    xsflib::AppendBe32(bank, 1); // drums
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0x19960214);
 
     // The offsets below count from here, 0x10.
-    Put32(bank, 0x10); // drums' table
-    Put32(bank, 0x20); // instrument 0
+    xsflib::AppendBe32(bank, 0x10); // drums' table
+    xsflib::AppendBe32(bank, 0x20); // instrument 0
     bank.resize(0x20, 0);
 
     // 0x10: the drums' table.
-    Put32(bank, 0x40);
+    xsflib::AppendBe32(bank, 0x40);
     bank.resize(0x30, 0);
 
     // 0x20: the instrument.
     bank.insert(bank.end(), {0, 20, 90, 0x10});
-    Put32(bank, 0x50); // envelope
-    Put32(bank, 0);
-    Put32(bank, 0);
-    Put32(bank, 0x60); // normal sample
-    Put32(bank, 0x3F800000);
-    Put32(bank, 0);
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, 0x50); // envelope
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0x60); // normal sample
+    xsflib::AppendBe32(bank, 0x3F800000);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
 
     // 0x40: the drum.
     bank.insert(bank.end(), {0x20, 64, 0, 0});
-    Put32(bank, 0x60);
-    Put32(bank, 0x40000000);
-    Put32(bank, 0x50);
+    xsflib::AppendBe32(bank, 0x60);
+    xsflib::AppendBe32(bank, 0x40000000);
+    xsflib::AppendBe32(bank, 0x50);
 
     // 0x50: the envelope: two points and a hang.
-    Put16(bank, 2);
-    Put16(bank, 32000);
-    Put16(bank, 100);
-    Put16(bank, 16000);
-    Put16(bank, 0xFFFF);
-    Put16(bank, 0);
+    xsflib::AppendBe16(bank, 2);
+    xsflib::AppendBe16(bank, 32000);
+    xsflib::AppendBe16(bank, 100);
+    xsflib::AppendBe16(bank, 16000);
+    xsflib::AppendBe16(bank, 0xFFFF);
+    xsflib::AppendBe16(bank, 0);
     bank.resize(0x60 + 0x10, 0);
 
     // 0x60: the sample. Two bytes of flags, padding, an address, a loop, a book and a size.
     bank.insert(bank.end(), {0, 0, 0, 0});
-    Put32(bank, 0x1000);
-    Put32(bank, 0x80);
-    Put32(bank, 0xC0);
-    Put32(bank, 901);
+    xsflib::AppendBe32(bank, 0x1000);
+    xsflib::AppendBe32(bank, 0x80);
+    xsflib::AppendBe32(bank, 0xC0);
+    xsflib::AppendBe32(bank, 901);
     bank.resize(0x80 + 0x10, 0);
 
     // 0x80: a loop with a state.
-    Put32(bank, 32);
-    Put32(bank, 1600);
-    Put32(bank, 0xFFFFFFFF);
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, 32);
+    xsflib::AppendBe32(bank, 1600);
+    xsflib::AppendBe32(bank, 0xFFFFFFFF);
+    xsflib::AppendBe32(bank, 0);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(bank, static_cast<uint16_t>(i + 100));
+        xsflib::AppendBe16(bank, static_cast<uint16_t>(i + 100));
     }
 
     // 0xC0: a book of one predictor.
     bank.resize(0xC0 + 0x10, 0);
-    Put32(bank, 2);
-    Put32(bank, 1);
+    xsflib::AppendBe32(bank, 2);
+    xsflib::AppendBe32(bank, 1);
     for (uint16_t i = 0; i < 16; i++)
     {
-        Put16(bank, i);
+        xsflib::AppendBe16(bank, i);
     }
 
     return bank;
@@ -159,41 +148,42 @@ void TestEarlyBank()
                  "an early bank's header holds 4096 instruments and 1 drums");
 }
 
-// A later bank with one instrument and one sound effect, whose sample uses a raw codec and a loop without a state.
+// A later bank with one instrument and one sound effect. The effect's sample uses a raw codec and a loop without a
+// state.
 Bytes LaterBank()
 {
     Bytes bank;
-    Put32(bank, 0);    // no drums
-    Put32(bank, 0x10); // effects
-    Put32(bank, 0x20); // instrument 0
+    xsflib::AppendBe32(bank, 0);    // no drums
+    xsflib::AppendBe32(bank, 0x10); // effects
+    xsflib::AppendBe32(bank, 0x20); // instrument 0
     bank.resize(0x10, 0);
 
     // 0x10: one sound effect.
-    Put32(bank, 0x40);
-    Put32(bank, 0x3F800000);
+    xsflib::AppendBe32(bank, 0x40);
+    xsflib::AppendBe32(bank, 0x3F800000);
     bank.resize(0x20, 0);
 
     // 0x20: the instrument, with no envelope.
     bank.insert(bank.end(), {0, 0, 127, 0});
-    Put32(bank, 0);
-    Put32(bank, 0);
-    Put32(bank, 0);
-    Put32(bank, 0x40);
-    Put32(bank, 0x40000000);
-    Put32(bank, 0);
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0x40);
+    xsflib::AppendBe32(bank, 0x40000000);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
 
     // 0x40: the sample: codec 1, medium 2, size 0x123.
-    Put32(bank, (1U << 28) | (2U << 26) | 0x123);
-    Put32(bank, 0x500);
-    Put32(bank, 0x50);
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, (1U << 28) | (2U << 26) | 0x123);
+    xsflib::AppendBe32(bank, 0x500);
+    xsflib::AppendBe32(bank, 0x50);
+    xsflib::AppendBe32(bank, 0);
 
     // 0x50: a loop without a state.
-    Put32(bank, 1);
-    Put32(bank, 2);
-    Put32(bank, 0);
-    Put32(bank, 0);
+    xsflib::AppendBe32(bank, 1);
+    xsflib::AppendBe32(bank, 2);
+    xsflib::AppendBe32(bank, 0);
+    xsflib::AppendBe32(bank, 0);
 
     return bank;
 }
@@ -234,7 +224,7 @@ Bytes EarlyBankWithEnvelope(const std::vector<n64::EadEnvelope::Point>& points)
     return data;
 }
 
-// Pokémon Stadium 2's bank 0x17 holds at offset 0x880 an envelope that starts (-4, 0), (1, 32700), (163, 23452).
+// Pokémon Stadium 2's bank 0x17 contains at offset 0x880 an envelope that starts (-4, 0), (1, 32700), (163, 23452).
 void TestEnvelopeWithNegativeDelay()
 {
     const Bytes data =
@@ -283,25 +273,25 @@ void TestEnvelopeEnds()
 void TestLaterTable()
 {
     Bytes data;
-    Put16(data, 2);
-    Put16(data, 3);
-    Put32(data, 0x1000);
-    Put32(data, 0xAABBCCDD);
-    Put32(data, 0);
+    xsflib::AppendBe16(data, 2);
+    xsflib::AppendBe16(data, 3);
+    xsflib::AppendBe32(data, 0x1000);
+    xsflib::AppendBe32(data, 0xAABBCCDD);
+    xsflib::AppendBe32(data, 0);
 
-    Put32(data, 0);
-    Put32(data, 0x100);
+    xsflib::AppendBe32(data, 0);
+    xsflib::AppendBe32(data, 0x100);
     data.insert(data.end(), {2, 1});
-    Put16(data, 0x0100);
-    Put16(data, 0x7F40);
-    Put16(data, 5);
+    xsflib::AppendBe16(data, 0x0100);
+    xsflib::AppendBe16(data, 0x7F40);
+    xsflib::AppendBe16(data, 5);
 
-    Put32(data, 0x100);
-    Put32(data, 0x80);
+    xsflib::AppendBe32(data, 0x100);
+    xsflib::AppendBe32(data, 0x80);
     data.insert(data.end(), {2, 0});
-    Put16(data, 0);
-    Put16(data, 0);
-    Put16(data, 0);
+    xsflib::AppendBe16(data, 0);
+    xsflib::AppendBe16(data, 0);
+    xsflib::AppendBe16(data, 0);
 
     const n64::EadTable table = n64::EadTable::Parse(data);
 
@@ -314,10 +304,10 @@ void TestLaterTable()
 void TestEarlyFiles()
 {
     Bytes file;
-    Put16(file, n64::kEarlyBankFileRevision);
-    Put16(file, 1);
-    Put32(file, 12);
-    Put32(file, 2);
+    xsflib::AppendBe16(file, n64::kEarlyBankFileRevision);
+    xsflib::AppendBe16(file, 1);
+    xsflib::AppendBe32(file, 12);
+    xsflib::AppendBe32(file, 2);
     file.insert(file.end(), {7, 8});
 
     XSFLIB_CHECK(n64::SeqFile::Matches(file, n64::kEarlyBankFileRevision));
@@ -334,7 +324,7 @@ void TestEarlyFiles()
     XSFLIB_CHECK((parsed_sets[0] == std::vector<uint8_t>{5, 6}) && (parsed_sets[1] == std::vector<uint8_t>{7}));
 }
 
-// A file of one sequence that holds one note on one channel, and the bank of EarlyBank.
+// A file of one sequence that contains one note on one channel, and the bank of EarlyBank.
 n64::EadEarlyFiles MiddleFiles()
 {
     const Bytes sequence = {
@@ -358,10 +348,10 @@ n64::EadEarlyFiles MiddleFiles()
     };
 
     Bytes file;
-    Put16(file, n64::kSeqFileRevision);
-    Put16(file, 1);
-    Put32(file, 12);
-    Put32(file, static_cast<uint32_t>(sequence.size()));
+    xsflib::AppendBe16(file, n64::kSeqFileRevision);
+    xsflib::AppendBe16(file, 1);
+    xsflib::AppendBe32(file, 12);
+    xsflib::AppendBe32(file, static_cast<uint32_t>(sequence.size()));
     file.insert(file.end(), sequence.begin(), sequence.end());
 
     n64::EadEarlyFiles files;
@@ -408,8 +398,8 @@ uint32_t ValueOf(const std::vector<n64::AudioCommand>& commands, uint32_t high_h
 
 // The middle engine's lists for the standard microcode. Wave Race 64 builds this form.
 //
-// A frame's 533 samples align to 544. The form takes an update for each 160 samples: (544 + 16) / 160 + 1 = 4. The
-// other form takes 192: (544 + 16) / 192 + 1 = 3. A voice has an envelope mixer in each update.
+// A frame's 533 samples align to 544. The form runs an update for each 160 samples: (544 + 16) / 160 + 1 = 4. The other
+// form runs one for each 192: (544 + 16) / 192 + 1 = 3. A voice has an envelope mixer in each update.
 void TestMiddleStandardForm()
 {
     const n64::EadEarlyFiles files = MiddleFiles();
@@ -429,7 +419,7 @@ void TestMiddleStandardForm()
                                       { return command.Opcode() == n64::kAudioEnvMixer; });
     XSFLIB_CHECK(mixers == 4);
 
-    // Each voice takes the session's gain for its dry output.
+    // Each voice uses the session's gain for its dry output.
     constexpr uint32_t kSetAux = (uint32_t{n64::kAudioSetVolume} << 8) | n64::kAudioFlagAux;
     XSFLIB_CHECK(ValueOf(second, kSetAux) == 0x5000);
 
@@ -503,7 +493,7 @@ void TestEarlyCommands()
     const n64::ScriptCommand third = n64::ReadScriptCommand(sequence, 39, EadEngine::kEarly, ScriptLevel::kLayer, true);
     XSFLIB_CHECK(third.low_bits == 7 && third.args[0] == -1 && third.args[1] == 0x62 && third.args[2] == 0x41);
 
-    // The same bytes read as short notes: a form 0 holds only a delay, and the other forms hold nothing.
+    // The same bytes read as short notes: a form 0 contains only a delay, and the other forms contain nothing.
     const n64::ScriptCommand short_first =
         n64::ReadScriptCommand(sequence, 32, EadEngine::kEarly, ScriptLevel::kLayer, false);
     XSFLIB_CHECK(short_first.args[0] == 0x18 && short_first.args[1] == -1 && short_first.next == 34);
@@ -537,7 +527,7 @@ void TestLaterCommands()
         n64::ReadScriptCommand(sequence, 3, EadEngine::kLater, ScriptLevel::kSequence, false);
     XSFLIB_CHECK(jump.op == ScriptOp::kJump && jump.args[0] == 7 && jump.next == 5);
 
-    // The early engine lacks the relative jumps.
+    // The early engine has no relative jumps.
     const n64::ScriptCommand early =
         n64::ReadScriptCommand(sequence, 3, EadEngine::kEarly, ScriptLevel::kSequence, false);
     XSFLIB_CHECK(early.op == ScriptOp::kUnknown);

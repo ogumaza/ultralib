@@ -3,16 +3,16 @@
 // A model of the form of Nintendo EAD's sound engine between the early and later ones, from Mario Kart 64. The engine
 // reads the early engine's files and plays their scripts with the commands of ead_script.h's kMiddle form. It writes
 // its voices' settings for each update to a table, like the later engine. It builds a whole frame's commands after it
-// has run the frame's updates. It uses the first of the EAD microcodes.
+// has run the frame's updates. Mario Kart 64 uses the first of the EAD microcodes. Wave Race 64 uses the standard
+// microcode.
 //
-// The model holds its state in plain values and indices. The sound files stay outside it. A copy of the object is a
-// snapshot while the files live. A script may write to its sequence. Each player therefore holds a copy of the
+// The model keeps its state in plain values and indices. The sound files stay outside it. A copy of the object is a
+// snapshot while the files live. A script may write to its sequence. Each player therefore keeps a copy of the
 // sequence's bytes.
 
 #pragma once
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -22,6 +22,8 @@
 #include "ultralib/n64/audio_memory.h"
 #include "ultralib/n64/ead_bank.h"
 #include "ultralib/n64/ead_early.h"
+#include "ultralib/n64/ead_list_kind.h"
+#include "ultralib/n64/ead_reverb_item.h"
 
 namespace ultralib::n64
 {
@@ -62,8 +64,8 @@ public:
     static constexpr int kLayers = 64;
     static constexpr int kPorts = 8;
 
-    // The files must outlive the player and its copies. The model takes its buffers from `memory`. `memory` holds the
-    // image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
+    // The files must outlive the player and its copies. The model allocates its buffers in `memory`. `memory` contains
+    // the image at its kImageBase. The samples' addresses then keep their low bits, like those of the game's DMA.
     EadMiddlePlayer(const EadMiddleConfig& config, const EadEarlyFiles& files, AudioMemory& memory);
 
     // Starts a sequence on a player. `fade_in_updates` of 0 starts at full volume.
@@ -89,7 +91,7 @@ public:
     void SetChannelReverb(int player, int channel, uint8_t reverb);
     void SetChannelStopNotes(int player, int channel, bool stop);
 
-    // A script's input from the game. A script reads -1 from a port that holds nothing new.
+    // A script's input from the game. A script reads -1 from a port that contains nothing new.
     void WritePort(int player, int channel, int port, int8_t value);
 
     // The sequence's value for its variation commands, from the game.
@@ -100,7 +102,8 @@ public:
 
     void SetSoundMode(EadSoundMode mode);
 
-    // Marks a bank as loaded. A script can change only to a bank that the engine holds. Start marks a sequence's banks.
+    // Marks a bank as loaded. A script can change only to a bank that the engine has loaded. Start marks a sequence's
+    // banks.
     void MarkBankLoaded(int bank);
 
     // Appends the commands of a frame of `samples` output samples, a multiple of 16, to `list`, saving them at
@@ -130,7 +133,7 @@ private:
         uint8_t depth = 0;
     };
 
-    // An envelope lies in a bank, in a sequence's bytes, or is the engine's default one.
+    // An envelope is in a bank or in a sequence's bytes, or is the engine's default one.
     struct EnvelopeRef
     {
         const EadEnvelope* bank = nullptr;
@@ -353,14 +356,7 @@ private:
         uint32_t halving_state = 0;
     };
 
-    struct ReverbItem
-    {
-        uint32_t downsample_left = 0;
-        uint32_t downsample_right = 0;
-        int32_t start = 0;
-        int16_t length_a = 0;
-        int16_t length_b = 0;
-    };
+    using ReverbItem = EadReverbItem;
 
     struct Reverb
     {
@@ -379,13 +375,8 @@ private:
         std::array<std::vector<ReverbItem>, 2> items;
     };
 
-    enum ListKind : uint8_t
-    {
-        kDisabled = 0,
-        kDecaying = 1,
-        kReleasing = 2,
-        kActive = 3,
-    };
+    using ListKind = EadListKind;
+    using enum EadListKind;
 
     // A sample that a voice decodes in an update, and the place in the part that the voice decodes.
     struct SampleDecode
@@ -476,7 +467,6 @@ private:
 
     // The parts of RunFrame.
     void RunUpdate(int update);
-    int UpdateLength(int remaining, int left);
 
     void EnsureBank(AudioMemory& memory, int bank);
     void StartReverbItem(AudioMemory& memory, Reverb& reverb, int length, int update);

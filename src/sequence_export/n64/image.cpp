@@ -2,7 +2,6 @@
 
 #include "ultralib/sequence_export/n64/image.h"
 
-#include <algorithm>
 #include <utility>
 
 #include "xsflib/binary.h"

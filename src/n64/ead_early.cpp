@@ -13,6 +13,10 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/rounding.h"
+
+#include "ead_common.h"
+#include "ead_constants.h"
 #include "ead_early_constants.h"
 #include "ead_lists.h"
 #include "ultralib/n64/rom_data.h"
@@ -23,13 +27,14 @@ namespace ultralib::n64
 namespace
 {
 
+using ead_constants::kChannelVibratoRate;
+using ead_constants::kMuteSoften;
+using ead_constants::kMuteStopNotes;
+using ead_constants::kMuteStopScript;
+using ead_constants::kPriorityDefault;
+using ead_constants::kTicksPerBeat;
 using ead_early_constants::kGlobalPool;
-using ead_early_constants::kMuteSoften;
-using ead_early_constants::kMuteStopNotes;
-using ead_early_constants::kMuteStopScript;
-using ead_early_constants::kPriorityDefault;
 using ead_early_constants::kStateFadeTo;
-using ead_early_constants::kTatumsPerBeat;
 using ead_lists::WriteBe16;
 
 constexpr int kChannelCount = 32;
@@ -37,8 +42,10 @@ constexpr int kLayerCount = 52;
 
 constexpr int kPoolCount = 1 + EadEarlyPlayer::kPlayers + kChannelCount;
 
-// The default envelope: up to 32000 over 4 updates, a hold, and a stay.
-const EadEnvelope kDefaultEnvelope = {.offset = kNoOffset, .points = {{4, 32000}, {1000, 32000}, {-1, 0}}};
+// The default envelope as a bank's envelope, for a channel's settings.
+const EadEnvelope kDefaultEnvelope = {
+    .offset = kNoOffset,
+    .points = {ead_constants::kDefaultEnvelopePoints.begin(), ead_constants::kDefaultEnvelopePoints.end()}};
 
 } // namespace
 
@@ -74,10 +81,10 @@ EadEarlyPlayer::EadEarlyPlayer(const EadEarlyConfig& config, const EadEarlyFiles
     : config_(config), files_(&files)
 {
     // A frame's target is the rate's share of a 60th of a second, on a multiple of 16 samples.
-    const int frame_target = (config.ai_frequency / 60 + 15) & ~15;
+    const int frame_target = ntdlib::AlignUp(config.ai_frequency / 60, 16);
     updates_per_frame_ = frame_target / 160 + 1;
     tempo_limit_ = static_cast<int16_t>(static_cast<uint32_t>(static_cast<float>(updates_per_frame_) * 2880000.0F /
-                                                              static_cast<float>(kTatumsPerBeat) / 16.713F));
+                                                              static_cast<float>(kTicksPerBeat) / 16.713F));
 
     channels_.resize(kChannelCount);
     layers_.resize(kLayerCount);
@@ -178,7 +185,7 @@ void EadEarlyPlayer::ResetPlayer(int index)
     player.state = 0;
     player.fade_updates = 0;
     player.tempo_count = 0;
-    player.tempo = 120 * kTatumsPerBeat;
+    player.tempo = 120 * kTicksPerBeat;
     player.transpose = 0;
     player.mute_behavior = kMuteStopScript | kMuteStopNotes | kMuteSoften;
     player.policy = 0;
@@ -193,6 +200,7 @@ void EadEarlyPlayer::ResetPlayer(int index)
 void EadEarlyPlayer::Start(int index, int sequence)
 {
     Player& player = players_[static_cast<std::size_t>(index)];
+
     if (sequence < 0 || static_cast<std::size_t>(sequence) >= files_->sequences.Entries().size())
     {
         return;
@@ -235,6 +243,7 @@ void EadEarlyPlayer::SetFadeVolume(int index, float volume)
 void EadEarlyPlayer::FadeTo(int index, float volume, int updates)
 {
     Player& player = players_[static_cast<std::size_t>(index)];
+
     if (updates <= 0)
     {
         SetFadeVolume(index, volume);
@@ -318,8 +327,8 @@ void EadEarlyPlayer::InitChannel(int index)
     channel.adsr.envelope = {.bank = &kDefaultEnvelope};
     channel.adsr.release = 0x20;
     channel.adsr.sustain = 0;
-    channel.vibrato_rate_target = 0x800;
-    channel.vibrato_rate_start = 0x800;
+    channel.vibrato_rate_target = kChannelVibratoRate;
+    channel.vibrato_rate_start = kChannelVibratoRate;
     channel.vibrato_extent_target = 0;
     channel.vibrato_extent_start = 0;
     channel.vibrato_rate_delay = 0;
@@ -347,6 +356,7 @@ void EadEarlyPlayer::InitChannels(int index, uint16_t mask)
 
         const int free_channel = AllocateChannel();
         slot = free_channel;
+
         if (free_channel >= 0)
         {
             InitChannel(free_channel);
@@ -397,6 +407,7 @@ void EadEarlyPlayer::EnableChannel(int index, int slot, uint32_t script)
     channel.script.depth = 0;
     channel.script.pc = script;
     channel.delay = 0;
+
     for (int i = 0; i < kLayersPerChannel; i++)
     {
         if (channel.layers[static_cast<std::size_t>(i)] != -1)
@@ -493,35 +504,23 @@ void EadEarlyPlayer::FreeLayer(int channel_index, int slot)
 int EadEarlyPlayer::FindInstrument(const Channel& channel, uint8_t program, const EadInstrument*& out,
                                    AdsrSettings& adsr) const
 {
+    // A bank without programs leaves the instrument as it is.
     const EadBank& bank = files_->banks[channel.bank];
-    const auto count = static_cast<int>(bank.program_instruments.size());
-    int id = program;
-    if (id >= count)
+    if (bank.program_instruments.empty())
     {
-        id = count;
-        if (id == 0)
-        {
-            return 0;
-        }
-
-        id--;
+        return 0;
     }
 
     // An empty program takes the nearest one below it.
-    int object = bank.program_instruments[static_cast<std::size_t>(id)];
-    while (object == kNoObject && id > 0)
-    {
-        id--;
-        object = bank.program_instruments[static_cast<std::size_t>(id)];
-    }
-
-    if (object == kNoObject)
+    const int id = ead_common::NearestProgram(bank, program);
+    if (id < 0)
     {
         out = nullptr;
 
         return 0;
     }
 
+    const int32_t object = bank.program_instruments[static_cast<std::size_t>(id)];
     const EadInstrument& instrument = bank.instruments[static_cast<std::size_t>(object)];
     adsr.envelope = {};
     if (instrument.envelope != kNoObject)

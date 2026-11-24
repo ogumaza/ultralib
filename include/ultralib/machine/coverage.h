@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 // Coverage for trimming a rip: which ROM words the CPU or the PI read, and which RDRAM words are read before they're
-// written. A word of RDRAM that's read before anything writes it comes from the save state, so the rip must keep it. A
-// word that's written first needs nothing from the state.
+// written. A word of RDRAM that's read before anything writes it comes from the save state. The rip must keep it. A
+// word that's written first takes nothing from the state.
 
 #pragma once
 

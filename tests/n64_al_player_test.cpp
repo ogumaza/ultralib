@@ -6,12 +6,12 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include <initializer_list>
 #include <utility>
 #include <vector>
 
 #include "xsflib/testing/check.h"
 
+#include "n64_bytes.h"
 #include "ultralib/n64/al_player.h"
 #include "ultralib/n64/al_synth.h"
 #include "ultralib/n64/audio_list.h"
@@ -21,9 +21,9 @@
 namespace
 {
 
-using Bytes = std::vector<uint8_t>;
-
 namespace n64 = ultralib::n64;
+using ultralib::testing::Bytes;
+using ultralib::testing::MakeSong;
 
 constexpr int kFrameSamples = 1024;
 constexpr uint8_t kNoteOn = 0x90;
@@ -67,20 +67,6 @@ n64::BankFile MakeBank(uint8_t sound_volume)
     n64::Bank bank;
     bank.instruments = {0};
     file.banks.push_back(bank);
-
-    return file;
-}
-
-// A standard MIDI file of format 0, with 480 ticks to a quarter note.
-Bytes MakeSong(std::initializer_list<uint8_t> track)
-{
-    Bytes file = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xE0, 'M', 'T', 'r', 'k'};
-    const auto size = static_cast<uint32_t>(track.size());
-    file.push_back(static_cast<uint8_t>(size >> 24));
-    file.push_back(static_cast<uint8_t>(size >> 16));
-    file.push_back(static_cast<uint8_t>(size >> 8));
-    file.push_back(static_cast<uint8_t>(size));
-    file.insert(file.end(), track.begin(), track.end());
 
     return file;
 }

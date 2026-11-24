@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+// The numeric tables of the early EAD engine (ead_tables.cpp). The middle and later engines take the ones that their
+// data repeats.
+
 #pragma once
 
 #include <array>
@@ -44,7 +47,7 @@ extern const std::array<float, 128> kRampSource128;
 // A quarter of the vibrato's wave.
 extern const std::array<int8_t, 16> kVibratoCurve;
 
-// The delay in samples of the far side in headset mode, at each of ten pans.
+// The delay in bytes of the far side in headset mode, at each of ten pans.
 extern const std::array<uint16_t, 10> kHeadsetPanDelay;
 
 // The velocities that a short note's command can name by default.

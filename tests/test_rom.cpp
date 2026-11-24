@@ -111,9 +111,9 @@ bool RunUntilSummary(System& system, const std::string& text, double seconds)
 // The names of the tests that failed in `text`, outside the categories that the core doesn't cover.
 std::set<std::string> FailuresInScope(const std::string& text)
 {
-    // Each failure starts "Test '<name>' failed". The RDP's tests can't pass, because the RDP doesn't draw, and the
-    // cache tests can't either, because the core has no caches. The core doesn't reverse the byte order in user mode
-    // when Status.RE is set. Games run in kernel mode, so none depends on it.
+    // Each failure starts "Test '<name>' failed". The RDP's tests can't pass: the RDP doesn't draw. The cache tests
+    // can't either: the core has no caches. The core doesn't reverse the byte order in user mode when Status.RE is set.
+    // Games run in kernel mode. None depends on it.
     static constexpr std::array<std::string_view, 5> kOutOfScope = {"RDP", "CACHE", "ICACHE", "DCACHE", "RE "};
     std::set<std::string> failed;
     size_t start = 0;
